@@ -9,10 +9,13 @@ from models import (
     MessageRequest,
     MessageResponse,
     RunCodeRequest,
+    RunTestsRequest,
+    RunTestsResponse,
     EndSessionRequest,
     EndSessionResponse,
 )
 from services import llm, piston
+from services import test_runner
 from services.supabase_client import get_supabase
 
 router = APIRouter(prefix="/interview", tags=["interview"])
@@ -122,6 +125,28 @@ def post_message(req: MessageRequest):
 async def run_code(req: RunCodeRequest):
     result = await piston.run_code(req.language, req.version, req.source, req.stdin or "")
     return result
+
+
+@router.post("/code/test", response_model=RunTestsResponse)
+async def run_tests(req: RunTestsRequest):
+    harness = test_runner.build_harness(req.language, req.source)
+    if harness is None:
+        # Language not supported by harness — run raw and wrap output
+        result = await piston.run_code(req.language, req.version, req.source)
+        raw = result.get("run", {})
+        return RunTestsResponse(
+            status="compile_error",
+            compile_error=raw.get("stderr") or raw.get("stdout") or "Language not supported for test cases.",
+            visible_tests=[],
+            hidden_tests=[],
+            passed=0,
+            total=7,
+        )
+
+    result = await piston.run_code(req.language, req.version, harness)
+    raw = result.get("run", {})
+    parsed = test_runner.parse_results(raw.get("stdout", ""), raw.get("stderr", ""))
+    return RunTestsResponse(**parsed)
 
 
 @router.delete("/{session_id}")

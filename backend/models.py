@@ -8,6 +8,36 @@ class StartSessionRequest(BaseModel):
     user_id: Optional[str] = None
 
 
+class VisibleTestResult(BaseModel):
+    id: int
+    label: str
+    input: str
+    expected: str
+    output: Optional[str] = None
+    error: Optional[str] = None
+    passed: bool
+
+
+class HiddenTestResult(BaseModel):
+    id: int
+    passed: bool
+
+
+class RunTestsRequest(BaseModel):
+    language: str
+    version: str
+    source: str
+
+
+class RunTestsResponse(BaseModel):
+    status: str
+    visible_tests: List[VisibleTestResult]
+    hidden_tests: List[HiddenTestResult]
+    passed: int
+    total: int
+    compile_error: Optional[str] = None
+
+
 class StartSessionResponse(BaseModel):
     session_id: str
     track: str
