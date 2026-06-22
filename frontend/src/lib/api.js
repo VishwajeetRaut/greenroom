@@ -22,6 +22,9 @@ export const api = {
   runCode: (payload) =>
     request("/interview/code/run", { method: "POST", body: JSON.stringify(payload) }),
 
+  runTests: (payload) =>
+    request("/interview/code/test", { method: "POST", body: JSON.stringify(payload) }),
+
   endSession: (payload) =>
     request("/interview/end", { method: "POST", body: JSON.stringify(payload) }),
 

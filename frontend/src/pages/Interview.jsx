@@ -15,17 +15,45 @@ const TRACK_LABELS = {
 };
 
 const LANGUAGES = [
-  { id: "python", label: "Python", monaco: "python", piston: "python", version: "3.10.0" },
-  { id: "javascript", label: "JavaScript", monaco: "javascript", piston: "javascript", version: "18.15.0" },
-  { id: "java", label: "Java", monaco: "java", piston: "java", version: "15.0.2" },
-  { id: "cpp", label: "C++", monaco: "cpp", piston: "cpp", version: "10.2.0" }
+  { id: "python",     label: "Python",     monaco: "python",     piston: "python", version: "3.10.0"  },
+  { id: "javascript", label: "JavaScript", monaco: "javascript", piston: "node",   version: "18.15.0" },
+  { id: "java",       label: "Java",       monaco: "java",       piston: "java",   version: "15.0.2"  },
+  { id: "cpp",        label: "C++",        monaco: "cpp",        piston: "gcc",    version: "10.2.0"  },
 ];
 
 const STARTER_CODE = {
-  python: "def solution():\n    pass\n",
-  javascript: "function solution() {\n\n}\n",
-  java: "class Solution {\n    public static void main(String[] args) {\n\n    }\n}\n",
-  cpp: "#include <iostream>\nusing namespace std;\n\nint main() {\n\n    return 0;\n}\n"
+  python: `def two_sum(nums: list[int], target: int) -> list[int]:
+    # Write your solution here
+    pass
+`,
+  javascript: `/**
+ * @param {number[]} nums
+ * @param {number} target
+ * @return {number[]}
+ */
+function twoSum(nums, target) {
+
+}
+`,
+  java: `class Solution {
+    public int[] twoSum(int[] nums, int target) {
+        // Write your solution here
+        return new int[]{};
+    }
+}
+`,
+  cpp: `#include <vector>
+#include <unordered_map>
+using namespace std;
+
+class Solution {
+public:
+    vector<int> twoSum(vector<int>& nums, int target) {
+        // Write your solution here
+        return {};
+    }
+};
+`,
 };
 
 export default function Interview() {
@@ -41,7 +69,8 @@ export default function Interview() {
 
   const [language, setLanguage] = useState("python");
   const [code, setCode] = useState(STARTER_CODE.python);
-  const [codeOutput, setCodeOutput] = useState(null);
+  const [testResults, setTestResults] = useState(null);
+  const [revealedCount, setRevealedCount] = useState(0);
   const [running, setRunning] = useState(false);
 
   const { isSupported, isListening, transcript, interimTranscript, start, stop, reset } =
@@ -130,18 +159,29 @@ export default function Interview() {
   };
 
   const handleRunCode = async () => {
-    setRunning(true);
-    setCodeOutput(null);
     const lang = LANGUAGES.find((l) => l.id === language);
+    setRunning(true);
+    setTestResults(null);
+    setRevealedCount(0);
+
     try {
-      const res = await api.runCode({
-        language: lang.piston,
-        version: lang.version,
-        source: code
-      });
-      setCodeOutput(res);
+      const res = await api.runTests({ language: lang.piston, version: lang.version, source: code });
+      setTestResults(res);
+      // Reveal visible test cases one by one, then all hidden at once
+      const visibleLen = res.visible_tests?.length ?? 0;
+      const hiddenLen  = res.hidden_tests?.length ?? 0;
+      for (let i = 1; i <= visibleLen + (hiddenLen > 0 ? 1 : 0); i++) {
+        setTimeout(() => setRevealedCount(i), i * 300);
+      }
     } catch {
-      setCodeOutput({ run: { stdout: "", stderr: "Could not reach the code execution service." } });
+      setTestResults({
+        status: "compile_error",
+        compile_error: "Could not reach the code execution service.",
+        visible_tests: [],
+        hidden_tests: [],
+        passed: 0,
+        total: 7,
+      });
     } finally {
       setRunning(false);
     }
@@ -269,7 +309,8 @@ export default function Interview() {
                     onChange={(e) => {
                       setLanguage(e.target.value);
                       setCode(STARTER_CODE[e.target.value]);
-                      setCodeOutput(null);
+                      setTestResults(null);
+                      setRevealedCount(0);
                     }}
                     className="rounded-lg border border-white/10 bg-panelLight px-3 py-1.5 text-xs text-cream"
                   >
@@ -296,13 +337,103 @@ export default function Interview() {
                     disabled={running}
                     className="rounded-full bg-sage px-5 py-2 text-sm font-medium text-ink transition hover:opacity-90 disabled:opacity-50"
                   >
-                    {running ? "Running..." : "Run code"}
+                    {running ? (
+                      <span className="flex items-center gap-2">
+                        <span className="inline-block h-3 w-3 animate-spin rounded-full border-2 border-ink border-t-transparent" />
+                        Running…
+                      </span>
+                    ) : "Run code"}
                   </button>
-                  {codeOutput && (
-                    <pre className="mt-3 max-h-40 overflow-auto rounded-lg bg-ink p-3 text-xs text-mute">
-{codeOutput.run?.stdout || ""}
-{codeOutput.run?.stderr ? `\n${codeOutput.run.stderr}` : ""}
-                    </pre>
+
+                  {running && (
+                    <div className="mt-3 space-y-2">
+                      {[0, 1, 2].map((i) => (
+                        <div key={i} className="h-8 animate-pulse rounded-lg bg-white/5" />
+                      ))}
+                    </div>
+                  )}
+
+                  {testResults && !running && (
+                    <div className="mt-3 overflow-hidden rounded-lg border border-white/10 bg-ink">
+                      {/* Summary bar */}
+                      <div className={`flex items-center justify-between px-4 py-2 text-xs font-medium ${
+                        testResults.status === "accepted"
+                          ? "bg-sage/15 text-sage"
+                          : "bg-coral/15 text-coral"
+                      }`}>
+                        <span>
+                          {testResults.status === "accepted" && "Accepted"}
+                          {testResults.status === "wrong_answer" && "Wrong Answer"}
+                          {testResults.status === "runtime_error" && "Runtime Error"}
+                          {testResults.status === "compile_error" && "Compilation Error"}
+                        </span>
+                        <span className="text-mute">
+                          {testResults.passed} / {testResults.total} passed
+                        </span>
+                      </div>
+
+                      {/* Compile error body */}
+                      {testResults.compile_error && (
+                        <pre className="max-h-32 overflow-auto p-3 text-xs text-coral">
+                          {testResults.compile_error}
+                        </pre>
+                      )}
+
+                      {/* Visible test cases */}
+                      {testResults.visible_tests?.slice(0, revealedCount).map((tc) => (
+                        <div
+                          key={tc.id}
+                          className={`border-t border-white/5 p-3 transition-all duration-300 ${
+                            tc.passed ? "" : "bg-coral/5"
+                          }`}
+                        >
+                          <div className={`flex items-center gap-2 text-xs font-medium ${
+                            tc.passed ? "text-sage" : "text-coral"
+                          }`}>
+                            <span>{tc.passed ? "✓" : "✗"}</span>
+                            <span>{tc.label}</span>
+                          </div>
+                          {!tc.passed && (
+                            <div className="mt-2 space-y-1 text-xs">
+                              <p className="text-mute">
+                                Input: <span className="font-mono text-cream">{tc.input}</span>
+                              </p>
+                              <p className="text-mute">
+                                Expected: <span className="font-mono text-cream">{tc.expected}</span>
+                              </p>
+                              <p className="text-mute">
+                                Got:{" "}
+                                <span className="font-mono text-coral">
+                                  {tc.error ?? tc.output ?? "no output"}
+                                </span>
+                              </p>
+                            </div>
+                          )}
+                        </div>
+                      ))}
+
+                      {/* Hidden test cases revealed after visible */}
+                      {revealedCount > (testResults.visible_tests?.length ?? 0) &&
+                        testResults.hidden_tests?.length > 0 && (
+                          <div className="border-t border-white/5 p-3">
+                            <p className="mb-2 text-xs text-mute">Hidden test cases</p>
+                            <div className="flex flex-wrap gap-2">
+                              {testResults.hidden_tests.map((tc) => (
+                                <span
+                                  key={tc.id}
+                                  className={`inline-flex items-center gap-1 rounded-full px-2.5 py-1 text-xs ${
+                                    tc.passed
+                                      ? "bg-sage/15 text-sage"
+                                      : "bg-coral/15 text-coral"
+                                  }`}
+                                >
+                                  🔒 {tc.passed ? "✓" : "✗"}
+                                </span>
+                              ))}
+                            </div>
+                          </div>
+                        )}
+                    </div>
                   )}
                 </div>
               </div>
