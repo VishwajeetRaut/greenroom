@@ -24,6 +24,7 @@ class HiddenTestResult(BaseModel):
 
 
 class RunTestsRequest(BaseModel):
+    session_id: str
     language: str
     version: str
     source: str
