@@ -129,18 +129,24 @@ async def run_code(req: RunCodeRequest):
 
 @router.post("/code/test", response_model=RunTestsResponse)
 async def run_tests(req: RunTestsRequest):
-    harness = test_runner.build_harness(req.language, req.source)
+    session = SESSIONS.get(req.session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    harness = test_runner.generate_harness(req.language, req.source, session["history"])
     if harness is None:
-        # Language not supported by harness — run raw and wrap output
-        result = await piston.run_code(req.language, req.version, req.source)
-        raw = result.get("run", {})
+        lang = req.language
+        if lang not in ("python", "node"):
+            msg = f"Test cases are not yet supported for {lang}. Switch to Python or JavaScript to use the test runner."
+        else:
+            msg = "No coding problem has been assigned yet — wait for the interviewer to give you a problem first."
         return RunTestsResponse(
             status="compile_error",
-            compile_error=raw.get("stderr") or raw.get("stdout") or "Language not supported for test cases.",
+            compile_error=msg,
             visible_tests=[],
             hidden_tests=[],
             passed=0,
-            total=7,
+            total=0,
         )
 
     result = await piston.run_code(req.language, req.version, harness)
