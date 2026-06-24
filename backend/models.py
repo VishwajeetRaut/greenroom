@@ -1,11 +1,10 @@
-from typing import Optional, List
-from pydantic import BaseModel
+from typing import Literal, Optional, List
+from pydantic import BaseModel, Field
 
 
 class StartSessionRequest(BaseModel):
-    track: str
-    role: Optional[str] = "Software Engineer"
-    user_id: Optional[str] = None
+    track: Literal["behavioral", "technical", "system-design"]
+    role: str = Field(default="Software Engineer", min_length=1, max_length=100)
 
 
 class VisibleTestResult(BaseModel):
@@ -47,9 +46,9 @@ class StartSessionResponse(BaseModel):
 
 class MessageRequest(BaseModel):
     session_id: str
-    message: str
-    code: Optional[str] = None
-    language: Optional[str] = None
+    message: str = Field(min_length=1, max_length=20_000)
+    code: Optional[str] = Field(default=None, max_length=100_000)
+    language: Optional[str] = Field(default=None, max_length=50)
 
 
 class MessageResponse(BaseModel):
@@ -58,10 +57,10 @@ class MessageResponse(BaseModel):
 
 
 class RunCodeRequest(BaseModel):
-    language: str
-    version: str
-    source: str
-    stdin: Optional[str] = ""
+    language: str = Field(min_length=1, max_length=50)
+    version: str = Field(min_length=1, max_length=50)
+    source: str = Field(min_length=1, max_length=100_000)
+    stdin: Optional[str] = Field(default="", max_length=20_000)
 
 
 class EndSessionRequest(BaseModel):

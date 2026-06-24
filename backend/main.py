@@ -8,7 +8,7 @@ load_dotenv()
 
 from routers import interview, tts  # noqa: E402
 
-app = FastAPI(title="Greenroom API", version="0.1.0")
+app = FastAPI(title="Greenroom API", version="0.2.0")
 
 origins = os.environ.get("ALLOWED_ORIGINS", "http://localhost:5173").split(",")
 
