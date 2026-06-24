@@ -1,307 +1,186 @@
 # Greenroom — Dev Design Document
 
-**Project:** Greenroom AI Mock Interview Platform  
-**Team:** Greenroom  
-**Date:** June 2026  
-**Version:** 1.0 — POC + Roadmap  
+**Team:** Vishwajeet, Geet, Anurag, Nithin, Mahati, Yuang
+**Version:** 2.0 · June 2026
 
 ---
 
 ## 1. Problem Statement & Goals
 
-### Problem
-
 Students and early-career job seekers have no accessible, realistic way to practice interviews with structured, personalised feedback. Existing options are:
 
-- **Human mock interviews** — hard to schedule, no consistent scoring
-- **Static Q&A tools** — no adaptive follow-up, no voice, no code execution
-- **General AI chatbots (ChatGPT, Copilot)** — no interview structure, no scoring, no memory of prior answers, no STAR evaluation
-
-### Goals
+- Human mock interviews: hard to schedule, no consistent scoring
+- Static Q&A tools: no adaptive follow-up, no voice, no code execution
+- General AI chatbots (ChatGPT, Copilot): no interview structure, no scoring, no STAR evaluation
 
 | Goal | Success Criteria |
 |---|---|
-| Deliver a realistic AI-driven interview experience | Candidate can complete a full session: speak answers, receive follow-up questions, get a scored report |
-| Provide structured, framework-based evaluation | STAR scores, per-dimension feedback, and actionable improvement points generated per session |
-| Cover three interview tracks | Behavioral, Technical (with live code execution), System Design (with diagram canvas) |
-| Support multiple seniority levels and roles | Entry Level, Senior, and role-specific question sets (SWE, PM, Data Science, etc.) |
-| Prove model accuracy is competitive | Evaluation scores benchmarked against human raters and general AI tools |
-| Run entirely on free or student-tier infrastructure | Zero cost for POC; Azure for Students credits used for upgrade path |
-
-### Out of Scope (POC)
-
-- Mobile app
-- Real-time multi-candidate sessions
-- Paid subscription tier
-- Live human reviewer integration
+| Realistic AI-driven interview | Candidate can complete a full session: speak answers, receive follow-ups, get a scored report |
+| STAR-based evaluation | STAR scores, per-dimension feedback, and actionable improvement points per session |
+| Three interview tracks | Behavioral, Technical (with live code execution), System Design (with diagram canvas) |
+| Multiple seniority levels and roles | Entry Level, Senior, with role-specific question sets (SWE, PM, Data Science, etc.) |
+| Prove model accuracy | Evaluation scores benchmarked against human raters and general AI tools |
+| Free or student-tier infrastructure | Zero cost for POC; Azure for Students credits for deployment |
 
 ---
 
-## 2. Solutions Overview
+## 2. Current State (as of June 2026)
 
-### High-Level Architecture
-
-```
-┌─────────────────────────────────────────────────────────────────┐
-│                         CLIENT LAYER                            │
-│                                                                 │
-│  React + Vite SPA          Monaco Code Editor                   │
-│  Web Speech API (STT)      Excalidraw Canvas (System Design)    │
-│  edge-tts Neural TTS       Question Bank Browser                │
-└──────────────────────────────┬──────────────────────────────────┘
-                               │ HTTPS / REST
-┌──────────────────────────────▼──────────────────────────────────┐
-│                       BACKEND SERVICES                          │
-│                                                                 │
-│  ┌───────────────────────────────────────────────────────────┐  │
-│  │          Interview Orchestrator  (FastAPI)                │  │
-│  │   Session state · Question sequencing · Role/level router │  │
-│  └──────────────────┬───────────────────────────────────────┘  │
-│                     │                                           │
-│  ┌──────────────────▼──────────┐  ┌────────────────────────┐   │
-│  │  LangChain LCEL Agent       │  │   Code Judge Service   │   │
-│  │  ChatGroq (Llama 3.3 70B)   │  │   Piston / Sandbox     │   │
-│  │  STAR Evaluation Chain      │  │   Multi-language exec  │   │
-│  │  Pydantic Output Parser     │  │   Test case runner     │   │
-│  └──────────────────┬──────────┘  └────────────────────────┘   │
-│                     │                                           │
-│  ┌──────────────────▼──────────────────────────────────────┐   │
-│  │               LLM Fallback Layer                        │   │
-│  │  Primary:  Groq — Llama 3.3 70B (free tier)             │   │
-│  │  Fallback: Ollama Cloud — Llama 3.3 70B (free tier)     │   │
-│  │  Upgrade:  Azure OpenAI GPT-4o via AI Foundry           │   │
-│  └──────────────────────────────────────────────────────────┘   │
-└──────────────────────────────┬──────────────────────────────────┘
-                               │
-┌──────────────────────────────▼──────────────────────────────────┐
-│                          DATA LAYER                             │
-│   Supabase — PostgreSQL + Auth + Row-Level Security             │
-│   sessions · messages · evaluations · questions tables          │
-└─────────────────────────────────────────────────────────────────┘
-```
-
-### Key User Flows
-
-**Flow 1 — Behavioral Interview**
-1. Candidate selects "Behavioral" track + seniority level + role
-2. AI interviewer opens with a STAR-appropriate question from the question bank
-3. Candidate speaks answer (Web Speech API → transcript)
-4. LangChain interview chain analyses which STAR element is missing → generates targeted follow-up
-5. Loop repeats 4–6 times
-6. Candidate ends session → evaluation chain produces STAR scores + report
-7. Results page shows overall score, STAR breakdown, per-category feedback, full transcript
-
-**Flow 2 — Technical Interview**
-1. Candidate selects "Technical" track + seniority (Entry/Senior) + language
-2. AI presents a coding problem sourced from the question bank (LeetCode / InterviewBit tagged)
-3. Candidate explains approach verbally, then codes in Monaco editor
-4. Candidate runs code → sandboxed execution returns stdout/stderr + test case results
-5. AI asks follow-up on complexity, edge cases, or trade-offs based on actual code submitted
-6. End → evaluation scores clarity, code correctness, technical depth
-
-**Flow 3 — System Design Interview**
-1. Candidate selects "System Design" track + seniority
-2. AI presents a design prompt (e.g. "Design a URL shortener")
-3. Candidate draws architecture on the embedded Excalidraw canvas AND explains verbally
-4. AI probes for scale, trade-offs, failure modes, data models
-5. End → evaluation scores structure, depth, and design decisions
-
----
-
-## 3. Scope & Constraints
-
-### In Scope
+The platform has moved beyond local development. The backend and Piston code runner are deployed to Azure Container Apps (Sweden Central). The frontend runs as a Dockerized nginx container on the same environment. CI/CD is fully wired via GitHub Actions.
 
 | Feature | Status |
 |---|---|
-| Behavioral interview with STAR evaluation | ✅ Built |
-| Technical interview with Monaco code editor | ✅ Built |
-| Sandboxed code execution (Piston) | ⚠️ Partially working — needs fix |
-| LangChain LCEL agent (not plain API calls) | ✅ Built |
-| Pydantic-validated structured evaluation output | ✅ Built |
-| STAR analysis panel in results | ✅ Built |
-| LLM primary/fallback (Groq → Ollama Cloud) | ✅ Built |
-| Auth + session history (Supabase) | ✅ Built |
-| Delete session from dashboard | ✅ Built |
-| System Design track with diagram canvas | 🔲 Planned |
-| Question bank (LeetCode / InterviewBit sourced) | 🔲 Planned |
-| Seniority levels (Entry / Senior) | 🔲 Planned |
-| Role selector (SWE / PM / Data Science / etc.) | 🔲 Planned |
-| Evaluation accuracy benchmarking vs competitors | 🔲 Planned |
-| Test case runner for coding problems | 🔲 Planned |
-
-### Constraints & Assumptions
-
-- LLM is not fine-tuned — it uses prompt engineering and chain structure only
-- Code execution relies on public Piston API (rate-limited); self-hosted Piston via Docker is the upgrade path
-- Voice STT requires Chrome or Edge (Web Speech API limitation)
-- No real-time WebSocket STT in POC — full streaming STT is an Azure Speech Services upgrade
-- Question bank is sourced from public datasets and API wrappers (not scraping)
+| Behavioral interview with STAR evaluation | Built + Deployed |
+| Technical interview with Monaco code editor | Built + Deployed |
+| Sandboxed code execution (self-hosted Piston + Wandbox fallback) | Built + Deployed |
+| LangChain LCEL agent (not plain API calls) | Built + Deployed |
+| Pydantic-validated structured evaluation output | Built + Deployed |
+| STAR analysis panel in results | Built + Deployed |
+| LLM primary/fallback (Groq to Ollama Cloud) | Built + Deployed |
+| Auth + session history (Supabase) | Built + Deployed |
+| Delete session from dashboard | Built + Deployed |
+| Dynamic test runner (LLM-generated test cases) | Built + Deployed |
+| System Design track with Excalidraw canvas | Built |
+| GitHub Actions CI/CD pipeline | Deployed |
+| Question bank (LeetCode / InterviewBit sourced) | Planned |
+| Seniority levels (Entry / Senior) | Planned |
+| Role selector (SWE / PM / Data Science / etc.) | Planned |
+| Evaluation accuracy benchmarking vs competitors | Planned |
 
 ---
 
-## 4. Key Design Decisions
+## 3. Architecture
 
-### 4.1 LangChain LCEL Instead of Plain API Calls
+![Greenroom Architecture](./architecture.svg)
 
-**Decision:** Use LangChain Expression Language chains for all LLM interactions.
+### 3.1 High-Level Stack
 
-**Why:**
-- Plain API calls (`groq.chat.completions.create(...)`) have no memory, no typed message sequencing, and no output schema
-- LCEL chains use `MessagesPlaceholder` to inject the full conversation history as typed `AIMessage`/`HumanMessage` objects — exactly the format the model was trained on
-- `JsonOutputParser(EvaluationResult)` validates LLM output against a Pydantic schema at runtime — malformed output is caught, not silently passed to the UI
-- The chain is provider-agnostic: swapping `ChatGroq(...)` for `AzureChatOpenAI(...)` is one line — no other code changes
-
-**Comparison:**
-
-| | Plain API Call | Greenroom LangChain Chain |
+| Layer | Service | Notes |
 |---|---|---|
-| Conversation memory | None — single turn | Full typed history via MessagesPlaceholder |
-| Role awareness | Manual string concat | Typed SystemMessage persona |
+| Frontend | React + Vite + Tailwind (Dockerfile + nginx) | Deployed to Azure Container Apps, serves built dist |
+| Speech-to-text | Web Speech API (browser) | Chrome/Edge only, no key needed |
+| Text-to-speech | edge-tts (backend) | Free, uses Microsoft Edge neural voices |
+| LLM (interviewer + scoring) | Groq API (Llama 3.3 70B) with Ollama Cloud fallback | Auto-retry on 429/5xx |
+| Code execution (primary) | Self-hosted Piston (Azure Container Apps, internal) | Internal ingress, no public exposure |
+| Code execution (fallback) | Wandbox (free public compiler API) | Covers Python, Node, Java, GCC |
+| Auth + database | Supabase (PostgreSQL + Row-Level Security) | Free tier |
+| CI/CD | GitHub Actions + ghcr.io + Azure OIDC | Deploys on every push to main |
+
+### 3.2 Deployment Topology
+
+All backend services run inside a shared Azure Container Apps environment (`orangeground-05e56063`, Sweden Central). Piston has internal-only ingress — not reachable from the internet. The API is the only external-facing backend service.
+
+```
+Frontend  (external)  https://greenroom-frontend.orangeground-05e56063.swedencentral.azurecontainerapps.io
+API       (external)  https://greenroom-api.orangeground-05e56063.swedencentral.azurecontainerapps.io
+Piston    (internal)  http://greenroom-piston.internal.orangeground-05e56063.swedencentral.azurecontainerapps.io
+```
+
+### 3.3 CI/CD Pipeline
+
+Push to `main` triggers `.github/workflows/deploy-containers.yml` which:
+
+- Builds Docker images for the backend and Piston using Docker Buildx (`linux/amd64`)
+- Pushes images to GitHub Container Registry (`ghcr.io`) tagged with commit SHA and `latest`
+- Authenticates to Azure via OIDC federated identity (no stored passwords)
+- Updates the Azure Container Apps via `az containerapp update`, injecting all secrets from GitHub repository secrets
+
+Manual re-deploy is also possible via `deploy.sh`, which builds all three images (including frontend), pushes to `ghcr.io`, and updates all three Container Apps in one command.
+
+---
+
+## 4. How It's Built
+
+### 4.1 LangChain LCEL, not plain API calls
+
+We use LangChain Expression Language chains for all LLM interactions rather than calling `groq.chat.completions.create(...)` directly. Plain API calls are single-turn — you lose conversation history unless you manually rebuild it on every request. LCEL chains use `MessagesPlaceholder` to inject the full typed history (`AIMessage`/`HumanMessage`) exactly as the model expects. `JsonOutputParser(EvaluationResult)` validates LLM output against a Pydantic schema at runtime, so malformed JSON gets caught rather than silently hitting the UI. Swapping the LLM provider is one line — `ChatGroq(...)` becomes `AzureChatOpenAI(...)` and nothing else changes.
+
+| | Plain API call | Greenroom LangChain chain |
+|---|---|---|
+| Conversation memory | None (single turn) | Full typed history via `MessagesPlaceholder` |
+| Role awareness | Manual string concat | Typed `SystemMessage` persona |
 | Output validation | None | Pydantic schema enforcement |
 | Provider coupling | Groq-specific | Provider-agnostic |
 | Fallback | None | Auto-retry on Ollama Cloud (429/5xx) |
 
----
+### 4.2 Self-hosted Piston with Wandbox fallback
 
-### 4.2 Sandbox Code Execution
-
-**Current problem:** The Piston public API is rate-limited and occasionally times out, making the "Run code" button unreliable.
-
-**Decision:** Self-host Piston via Docker as the primary executor; keep public Piston as fallback.
+The public Piston API at emkc.org now requires authentication (returns 401). We self-hosted it as an internal Azure Container App and added Wandbox as a second fallback. The execution chain:
 
 ```
-Candidate runs code
+Candidate clicks "Run code"
     → POST /api/interview/code/run
-        → Try self-hosted Piston (Docker, localhost)
-        → Fallback: public Piston API (emkc.org)
-        → Return stdout / stderr / exit code
-        → Run against hidden test cases → pass/fail per case
+        → Tier 1: Self-hosted Piston (internal Azure Container App)
+            [401 or timeout → fall through]
+        → Tier 2: Wandbox (free public compiler, no auth)
+            [error → fall through]
+        → Tier 3: Graceful "temporarily unavailable" message
 ```
 
-**Self-hosting Piston:**
-```bash
-docker run --rm -d \
-  -p 2000:2000 \
-  --name piston \
-  ghcr.io/engineer-man/piston
+Wandbox responses get normalised to Piston's response shape before returning, so nothing else in the codebase knows or cares which service handled the execution.
+
+**Note:** Azure Container Apps' free consumption plan doesn't support `--privileged` Docker mode. Piston's `isolate` sandbox needs it. In practice Wandbox handles most cases when Piston's sandbox fails. A dedicated D4 workload profile (~$50/month) would give us full privileged Piston on Azure.
+
+### 4.3 Dynamic test runner
+
+The test runner (`backend/services/test_runner.py`) uses a two-step approach specifically designed to prevent LLM syntax errors from crashing execution. We don't ask the LLM to write runnable code — we only ask it to produce a JSON array of test case data. Then we write the harness ourselves.
+
+**Step 1 — LLM generates test data only:**
+```json
+[
+  {"call": "two_sum([2,7,11,15], 9)", "expected": "[0, 1]"},
+  {"call": "two_sum([3,2,4], 6)",     "expected": "[1, 2]"}
+]
 ```
 
-Cost: free on any machine with Docker. On Azure: Azure Container Instances (free tier).
+**Step 2 — We inject that data into a harness template we control.** The harness runs 3 visible cases and 3 hidden cases, emits one JSON line per case to stdout, and we parse the results into a structured `RunTestsResponse`.
 
----
+Currently supports Python and Node.js. Java/C++ return a friendly message. If no coding problem has been assigned in the session yet, the runner returns a clear error rather than generating test cases against an empty history.
 
-### 4.3 System Design Diagram Canvas
+### 4.4 Guardrails
 
-**Decision:** Embed Excalidraw (open source, MIT licence) as the whiteboard for System Design sessions.
-
-**Why Excalidraw:**
-- Open source, no API key, no usage limits
-- React component (`@excalidraw/excalidraw`) embeds directly in the frontend
-- Canvas state (JSON) can be serialised and stored in Supabase alongside the transcript
-- The LLM can be given a text description of the diagram elements to probe design decisions
-
-**Flow:**
-```
-Candidate draws components (boxes, arrows, labels) on canvas
-    → Canvas JSON serialised every 10 seconds (debounced)
-    → On "Send answer" → diagram JSON + verbal answer both sent to backend
-    → Backend converts diagram JSON to a readable description for the LLM
-    → LLM probes based on what the candidate drew AND said
-```
-
----
-
-### 4.4 Question Bank
-
-**Decision:** Build a structured question bank seeded from public sources.
-
-**Sources:**
-- LeetCode problem set (public dataset / API wrappers)
-- InterviewBit problem set (public)
-- STAR behavioral question corpus (curated)
-- System design prompt library (curated)
-
-**Schema:**
-```sql
-questions (
-  id          uuid PRIMARY KEY,
-  track       text,       -- behavioral | technical | system-design
-  difficulty  text,       -- entry | mid | senior
-  role        text[],     -- ['software-engineer', 'data-scientist', ...]
-  title       text,
-  body        text,
-  source      text,       -- leetcode | interviewbit | internal
-  tags        text[],     -- ['arrays', 'dynamic-programming', ...]
-  test_cases  jsonb,      -- [{input, expected_output}] for coding problems
-  created_at  timestamptz
-)
-```
-
-**Selection logic:** On session start, the backend selects a question matching `track + difficulty + role` from the question bank, rather than using a hardcoded opening question.
-
----
-
-### 4.5 Seniority Levels and Roles
-
-**Decision:** Add `level` (Entry / Senior) and `role` (SWE / PM / Data Science / DevOps / Product Design) selectors to the session start flow.
-
-**How it changes the system:**
-
-| Parameter | Entry Level | Senior Level |
+| Guardrail | Where | Behaviour |
 |---|---|---|
-| Question difficulty | Easy–Medium | Medium–Hard |
+| Piston 401 detection | `services/piston.py` | If self-hosted returns 401, skip to Wandbox without crashing |
+| Empty session guard | `routers/interview.py` | If session ends with no candidate answers, returns score 0 with a message instead of sending empty transcript to LLM |
+| Test runner no-problem guard | `services/test_runner.py` | Returns friendly error if no coding problem found in history |
+| Unsupported language guard | `routers/interview.py` | Friendly message for Java/C++ instead of silent failure |
+| CORS lock | `main.py` | `ALLOWED_ORIGINS` env var restricts origins to deployed frontend in production |
+| Piston internal-only ingress | Azure Container Apps config | Piston not reachable from the internet; only the API can call it |
+| OIDC auth for CI/CD | GitHub Actions workflow | No Azure credentials stored as repository secrets |
+| LLM JSON fallback | `services/llm.py` | If JSON parse fails after both Groq and Ollama, returns a safe default evaluation object |
+
+### 4.5 System Design track
+
+Excalidraw (MIT licence, `@excalidraw/excalidraw`) is embedded as the whiteboard. `SystemDesignBoard.jsx` is built and in the frontend. Canvas state serialises to JSON on each answer submission, gets sent to the backend alongside the verbal answer, and the LLM receives a text description of the diagram elements so it can probe the design decisions.
+
+### 4.6 Seniority levels and roles (planned)
+
+The LangChain personas are already parameterised by `track`. Adding `level` (entry/senior) and `role` (SWE, PM, Data Science, DevOps) requires extending the `PERSONAS` dict and adding selectors to the session start flow.
+
+| Parameter | Entry | Senior |
+|---|---|---|
+| Question difficulty | Easy/Medium | Medium/Hard |
 | Follow-up depth | Explain your reasoning | Justify trade-offs, scale, team impact |
-| Evaluation rubric | Understanding + clarity | Architecture decisions + leadership |
-| STAR expectation | Basic Situation + Action | Result must include team/business impact |
-| Technical depth | Correct solution | Optimal solution + complexity analysis |
+| STAR expectation | Situation + Action | Result must include team/business impact |
+| Technical depth | Correct solution | Optimal + complexity analysis |
 
-The interviewer persona in the LangChain system prompt is parameterised by both `track` and `level`:
+### 4.7 Evaluation benchmarking (planned)
 
-```python
-PERSONAS = {
-  ("behavioral", "entry"):  "You are interviewing a new graduate ...",
-  ("behavioral", "senior"): "You are interviewing a senior candidate with 5+ years ...",
-  ("technical",  "entry"):  "Focus on correctness and problem understanding ...",
-  ("technical",  "senior"): "Expect optimal solutions, complexity analysis, and edge case handling ...",
-}
-```
+Three-tier benchmark to prove our evaluation is more reliable than asking a general-purpose LLM to score an interview:
 
----
-
-### 4.6 Evaluation Accuracy — Benchmarking Against Competitors
-
-**Problem:** Any LLM can produce scores. We need to prove ours are accurate and consistent.
-
-**Approach:** Build an evaluation benchmark with 3 tiers.
-
-**Tier 1 — Inter-rater Reliability (Human vs. Model)**
-- Collect 20 real interview transcripts
-- Have 3 human raters score each on the same rubric (clarity, structure, confidence, STAR)
-- Run the same transcripts through Greenroom's evaluation chain
-- Compute Pearson correlation and mean absolute error between human scores and model scores
-- Target: correlation > 0.80
-
-**Tier 2 — Consistency (Model vs. Model)**
-- Run the same transcript through Greenroom 5 times
-- Measure score variance across runs
-- Target: standard deviation < 0.5 points on a 10-point scale
-
-**Tier 3 — Competitor Comparison**
-- Submit the same transcript to ChatGPT (GPT-4o) and Gemini with a plain "score this interview" prompt
-- Compare output structure, STAR coverage, actionability of feedback
-- Greenroom advantages: STAR schema-enforced, per-element breakdown, missing_elements field, consistent JSON output
-
-**Metrics table (to be filled post-benchmarking):**
+- **Tier 1 (human vs model):** 20 real transcripts, 3 human raters, same rubric. Target Pearson r > 0.80.
+- **Tier 2 (consistency):** Same transcript run 5 times. Target std dev < 0.5 on a 10-point scale.
+- **Tier 3 (competitor comparison):** Same transcript to GPT-4o and Gemini with a plain scoring prompt.
 
 | Metric | Greenroom | ChatGPT (plain prompt) | Gemini (plain prompt) |
 |---|---|---|---|
 | Human correlation (Pearson r) | TBD | TBD | TBD |
 | Score variance (std dev) | TBD | TBD | TBD |
-| STAR element coverage | ✅ Always (schema-enforced) | ❌ Inconsistent | ❌ Inconsistent |
-| Missing element identification | ✅ Structured list | ❌ Free text only | ❌ Free text only |
-| Output structure guaranteed | ✅ Pydantic-validated | ❌ Unstructured | ❌ Unstructured |
-| Adaptive follow-up | ✅ Based on missing STAR elements | ❌ Static | ❌ Static |
+| STAR element coverage | Always (schema-enforced) | Inconsistent | Inconsistent |
+| Missing element identification | Structured list | Free text only | Free text only |
+| Output structure guaranteed | Pydantic-validated | Unstructured | Unstructured |
+| Adaptive follow-up | Based on missing STAR elements | Static | Static |
 
 ---
 
@@ -309,21 +188,20 @@ PERSONAS = {
 
 | Risk | Likelihood | Impact | Mitigation |
 |---|---|---|---|
-| Piston public API rate-limits during demo | High | High | Self-host Piston via Docker before demo |
-| LLM produces invalid JSON despite json_mode | Low | Medium | JsonOutputParser has fallback default response |
-| Groq rate-limit during heavy usage | Medium | High | Ollama Cloud fallback already implemented |
-| Excalidraw diagram → LLM description quality | Unknown | Medium | Spike needed: test how well LLM interprets diagram JSON |
-| Question bank sourcing (legal/ToS) | Medium | Medium | Use only public datasets and API wrappers; avoid scraping |
-| Benchmarking human raters — sourcing 3 raters | Medium | Medium | Can use team members + mentor as raters for POC |
-| Score variance from LLM temperature | Low | Medium | Temperature fixed at 0.3 for evaluation chain |
+| Piston privileged mode not supported on ACA free tier | High | Medium | Wandbox fallback handles it; dedicated D4 plan enables full Piston |
+| Groq rate-limit during demo | Medium | High | Ollama Cloud fallback already implemented and tested |
+| LLM invalid JSON despite json_mode | Low | Medium | `JsonOutputParser` + safe default evaluation object in catch |
+| Wandbox down or rate-limited | Low | Medium | Graceful unavailable message; session continues without code execution |
+| Question bank sourcing (legal/ToS) | Medium | Medium | Use only public datasets and API wrappers; no scraping |
+| Benchmarking human raters sourcing | Medium | Low | Team + mentor can serve as raters for POC |
+| Session state lost on backend restart | Medium | Medium | In-memory `SESSIONS` dict; Redis upgrade path documented |
 
-### Open Questions
-
+**Open questions:**
 1. Should the question bank be seeded manually or pulled live from a LeetCode API wrapper?
-2. What roles should be in V1? (SWE confirmed; PM, Data Science, DevOps — confirm with mentor)
-3. For the diagram canvas — should the diagram be saved as a screenshot (image) or JSON? Image would require vision model.
+2. What roles should be in V1? (SWE confirmed; PM, Data Science, DevOps to confirm with mentor)
+3. For system design: save diagram as screenshot (requires vision model) or JSON (current plan)?
 4. How many human raters are needed for the benchmark to be statistically defensible?
-5. Is self-hosting Piston allowed within Azure for Students quota constraints?
+5. Should session state move to Redis now or only if multi-instance deployment is needed?
 
 ---
 
@@ -331,43 +209,41 @@ PERSONAS = {
 
 | Action | Owner | Target |
 |---|---|---|
-| Fix Piston integration — self-host via Docker | Dev team | Before next demo |
-| Integrate Excalidraw canvas into System Design page | Dev team | Week 3 |
 | Seed question bank (behavioral + technical) | Dev team | Week 3 |
 | Add seniority + role selector to session start | Dev team | Week 2 |
 | Parameterise LangChain personas by level | Dev team | Week 2 |
+| Integrate System Design track end-to-end (canvas + LLM probe) | Dev team | Week 3 |
 | Source 20 transcripts for benchmark | Dev team | Week 4 |
 | Recruit 3 human raters for benchmark | Team lead | Week 4 |
 | Run benchmark and fill metrics table | Dev team | Week 5 |
-| Migrate to Azure OpenAI GPT-4o (if credits approved) | Dev team | Week 4 |
-| Deploy backend to Azure Container Apps | Dev team | Week 6 |
-| Deploy frontend to Vercel | Dev team | Week 6 |
+| Evaluate Azure OpenAI GPT-4o migration (if credits approved) | Dev team | Week 4 |
+| Move session state to Redis if multi-instance needed | Dev team | Week 5 |
 
 ---
 
-## 7. Links & References
+## 7. Azure Migration Map
 
-| Resource | Link |
-|---|---|
-| GitHub Repository | https://github.com/VishwajeetRaut/greenroom |
-| LangChain LCEL Docs | https://python.langchain.com/docs/expression_language |
-| Piston API (self-host) | https://github.com/engineer-man/piston |
-| Excalidraw React Component | https://github.com/excalidraw/excalidraw |
-| Groq Free Tier | https://console.groq.com |
-| Ollama Cloud | https://ollama.com |
-| Supabase | https://supabase.com |
-| Azure for Students | https://azure.microsoft.com/en-us/free/students |
-| Azure OpenAI (upgrade path) | https://azure.microsoft.com/en-us/products/ai-services/openai-service |
-| Azure Speech Services | https://azure.microsoft.com/en-us/products/ai-services/speech-services |
+Every component has a direct Azure equivalent. Migration requires only configuration changes, no architectural rewrites.
+
+| Current (free) | Azure equivalent | Effort |
+|---|---|---|
+| ChatGroq (Llama 3.3 70B) | Azure OpenAI GPT-4o via AI Foundry | 1 line in `llm.py` |
+| Web Speech API | Azure Speech Services (real-time STT) | Replace browser STT hook |
+| edge-tts | Azure Neural TTS (same voices, higher quality) | Update `tts.py` |
+| Supabase (PostgreSQL) | Azure Cosmos DB for PostgreSQL | Update connection string |
+| In-memory `SESSIONS` dict | Azure Cache for Redis | Update session store module |
+| Piston (Docker, internal ACA) | Azure Container Apps Dynamic Sessions | Replace `piston.py` caller |
+| Supabase Auth | Azure Active Directory B2C | Update auth client |
+| ACA consumption plan | ACA dedicated D4 workload profile | Enables privileged Piston (~$50/month) |
 
 ---
 
-## Appendix A — Current Data Model
+## Appendix A: Current Data Model
 
 ```sql
 sessions (
   id            uuid PRIMARY KEY,
-  user_id       uuid → auth.users,
+  user_id       uuid -> auth.users,
   track         text,           -- behavioral | technical | system-design
   role          text,           -- e.g. Software Engineer
   level         text,           -- entry | senior  [PLANNED]
@@ -381,7 +257,7 @@ sessions (
 
 messages (
   id          bigint PRIMARY KEY,
-  session_id  uuid → sessions,
+  session_id  uuid -> sessions,
   role        text,             -- interviewer | candidate
   content     text,
   created_at  timestamptz
@@ -389,7 +265,7 @@ messages (
 
 evaluations (
   id          bigint PRIMARY KEY,
-  session_id  uuid → sessions,
+  session_id  uuid -> sessions,
   category    text,             -- clarity | structure | confidence | technical depth
   score       int,
   feedback    text
@@ -410,21 +286,16 @@ questions (                     -- [PLANNED]
 
 ---
 
-## Appendix B — Azure Migration Map
+## Links
 
-Every component in the current free-tier stack has a direct Azure equivalent. Migration requires no architectural changes — only configuration updates.
-
-| Current (Free) | Azure Equivalent | Migration Effort |
-|---|---|---|
-| ChatGroq (Llama 3.3 70B) | Azure OpenAI GPT-4o via AI Foundry | Change 1 line in llm.py |
-| Web Speech API | Azure Speech Services — Real-time STT | Replace browser STT hook |
-| edge-tts | Azure Neural TTS (same voices, higher quality) | Update tts.py |
-| Supabase (PostgreSQL) | Azure Cosmos DB for PostgreSQL | Update connection string |
-| In-memory session dict | Azure Cache for Redis | Update session store |
-| Piston (Docker) | Azure Container Instances | Redeploy container |
-| Supabase Auth | Azure Active Directory B2C | Update auth client |
-| Vercel (frontend) | Azure Static Web Apps | Add azure-staticwebapps.yml |
-
----
-
-*Greenroom Dev Design Document — v1.0 — June 2026*
+| Resource | Link |
+|---|---|
+| GitHub | https://github.com/VishwajeetRaut/greenroom |
+| LangChain LCEL docs | https://python.langchain.com/docs/expression_language |
+| Piston (self-host) | https://github.com/engineer-man/piston |
+| Wandbox | https://wandbox.org |
+| Excalidraw | https://github.com/excalidraw/excalidraw |
+| Groq | https://console.groq.com |
+| Ollama Cloud | https://ollama.com |
+| Supabase | https://supabase.com |
+| Azure for Students | https://azure.microsoft.com/en-us/free/students |
