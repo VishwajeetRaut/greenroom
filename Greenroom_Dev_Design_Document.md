@@ -1,4 +1,4 @@
-# Greenroom — Dev Design Document
+# Greenroom:Dev Design Document
 
 **Team:** Vishwajeet, Geet, Anurag, Nithin, Mahati, Yuang
 **Version:** 2.0 · June 2026
