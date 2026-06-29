@@ -298,7 +298,11 @@ async def run_tests(req: RunTestsRequest, user: AuthenticatedUser = Depends(get_
         assigned_question=session.get("assigned_question"),
     )
     if harness is None:
-        msg = "No coding problem has been assigned yet — wait for the interviewer to give you a problem first."
+        lang = req.language
+        if lang not in ("python", "node"):
+            msg = f"Test cases are not yet supported for {lang}. Switch to Python or JavaScript to use the test runner."
+        else:
+            msg = "No coding problem has been assigned yet — wait for the interviewer to give you a problem first."
         return RunTestsResponse(
             status="compile_error",
             compile_error=msg,
