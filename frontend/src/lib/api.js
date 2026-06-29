@@ -36,5 +36,8 @@ export const api = {
   deleteSession: (sessionId) =>
     request(`/interview/${sessionId}`, { method: "DELETE" }),
 
+  getBoilerplate: (sessionId, language) =>
+    request(`/interview/${sessionId}/boilerplate?language=${encodeURIComponent(language)}`),
+
   speak: (text) => `${BASE_URL}/tts/speak?text=${encodeURIComponent(text)}`
 };

@@ -15,6 +15,7 @@ from models import (
     RunCodeRequest,
     RunTestsRequest,
     RunTestsResponse,
+    BoilerplateResponse,
     EndSessionRequest,
     EndSessionResponse,
 )
@@ -236,6 +237,47 @@ async def run_code(req: RunCodeRequest, user: AuthenticatedUser = Depends(get_cu
     check_rate_limit(user.id, max_per_minute=20)
     result = await piston.run_code(req.language, req.version, req.source, req.stdin or "")
     return result
+
+
+@router.get("/{session_id}/boilerplate", response_model=BoilerplateResponse)
+async def get_boilerplate(session_id: str, language: str, user: AuthenticatedUser = Depends(get_current_user)):
+    """The candidate's actual editor starter code depends entirely on what the
+    assigned problem's signature is in this language — there's no single
+    generic "// write your code here" stub that's correct for every problem,
+    especially once Java/C++ harnesses are involved (each one defines its own
+    function name/signature, generated specifically for that problem). Called
+    when the candidate switches languages so the editor can show the real
+    signature instead of leaving them to guess it (and fail to compile)."""
+    session = _get_session(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+    _check_ownership(session, user)
+
+    assigned = session.get("assigned_question")
+    if not assigned:
+        return BoilerplateResponse(boilerplate=None, supported=True)
+
+    is_stdio = bool(assigned.get("tests") and "stdin" in assigned["tests"][0])
+    bank_lang = "cpp" if language == "gcc" else language
+    allowed = set(assigned.get("languages") or [])
+    if "cpp" in allowed:
+        allowed.add("gcc")
+
+    if is_stdio:
+        return BoilerplateResponse(boilerplate=None, supported=language in allowed)
+
+    if bank_lang in (assigned.get("languages") or []):
+        # Python/JS: no generated boilerplate stored — these use the existing
+        # generic per-language starter code in the frontend.
+        return BoilerplateResponse(boilerplate=None, supported=True)
+
+    if bank_lang not in ("java", "cpp"):
+        return BoilerplateResponse(boilerplate=None, supported=False)
+
+    harness_data = await harness_generator.get_or_generate(assigned, bank_lang)
+    if not harness_data:
+        return BoilerplateResponse(boilerplate=None, supported=False)
+    return BoilerplateResponse(boilerplate=harness_data["boilerplate"], supported=True)
 
 
 @router.post("/code/test", response_model=RunTestsResponse)

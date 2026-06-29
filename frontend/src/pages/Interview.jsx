@@ -87,6 +87,8 @@ export default function Interview() {
   const [revealedCount, setRevealedCount] = useState(0);
   const [running, setRunning] = useState(false);
   const [slowHint, setSlowHint] = useState(false);
+  const [boilerplateNote, setBoilerplateNote] = useState(null);
+  const boilerplateRequestRef = useRef(0);
 
   const { isSupported, isListening, transcript, interimTranscript, start, stop, reset } =
     useSpeechRecognition();
@@ -190,6 +192,35 @@ export default function Interview() {
       ]);
     } finally {
       setSending(false);
+    }
+  };
+
+  const handleLanguageChange = async (newLanguage) => {
+    setLanguage(newLanguage);
+    setCode(STARTER_CODE[newLanguage]);
+    setTestResults(null);
+    setRevealedCount(0);
+    setBoilerplateNote(null);
+
+    const lang = LANGUAGES.find((l) => l.id === newLanguage);
+    if (!sessionId || (lang.id !== "java" && lang.id !== "cpp")) return;
+
+    // The generic starter code above is a placeholder — for problems with a
+    // generated Java/C++ harness, only that harness's own boilerplate has the
+    // right method/class signature. Without this, candidates have no way to
+    // know the expected signature and their first attempt always fails to
+    // compile against the wrong shape.
+    const requestId = ++boilerplateRequestRef.current;
+    try {
+      const res = await api.getBoilerplate(sessionId, lang.piston);
+      if (boilerplateRequestRef.current !== requestId) return; // a newer switch superseded this
+      if (res.boilerplate) {
+        setCode(res.boilerplate);
+      } else if (!res.supported) {
+        setBoilerplateNote(`This problem doesn't support ${lang.label} yet — try Python or JavaScript.`);
+      }
+    } catch {
+      // Generic starter code already showing — silently keep it.
     }
   };
 
@@ -369,12 +400,7 @@ export default function Interview() {
                   <span className="text-sm text-mute">Code editor</span>
                   <select
                     value={language}
-                    onChange={(e) => {
-                      setLanguage(e.target.value);
-                      setCode(STARTER_CODE[e.target.value]);
-                      setTestResults(null);
-                      setRevealedCount(0);
-                    }}
+                    onChange={(e) => handleLanguageChange(e.target.value)}
                     className="rounded-lg border border-white/10 bg-panelLight px-3 py-1.5 text-xs text-cream"
                   >
                     {LANGUAGES.map((l) => (
@@ -384,6 +410,9 @@ export default function Interview() {
                     ))}
                   </select>
                 </div>
+                {boilerplateNote && (
+                  <p className="border-b border-white/5 px-5 py-2 text-xs text-amber-300/80">{boilerplateNote}</p>
+                )}
                 <div className="flex-1">
                   <Editor
                     height="320px"

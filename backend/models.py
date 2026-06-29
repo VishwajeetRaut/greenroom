@@ -58,6 +58,11 @@ class MessageResponse(BaseModel):
     done: bool = False
 
 
+class BoilerplateResponse(BaseModel):
+    boilerplate: Optional[str] = None
+    supported: bool = True
+
+
 class RunCodeRequest(BaseModel):
     language: str = Field(min_length=1, max_length=50)
     version: str = Field(min_length=1, max_length=50)
