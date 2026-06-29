@@ -138,6 +138,10 @@ export default function Interview() {
         setMessages([{ role: "interviewer", text: res.question }]);
         speakIfUnmuted(res.question);
       } catch (err) {
+        if (err.message?.includes("401") || err.message?.includes("403")) {
+          navigate("/login", { replace: true });
+          return;
+        }
         setMessages([
           {
             role: "interviewer",
