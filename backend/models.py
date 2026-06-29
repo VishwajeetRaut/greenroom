@@ -37,6 +37,7 @@ class RunTestsResponse(BaseModel):
     passed: int
     total: int
     compile_error: Optional[str] = None
+    error_type: Optional[Literal["transient", "permanent"]] = None
 
 
 class StartSessionResponse(BaseModel):
@@ -55,6 +56,11 @@ class MessageRequest(BaseModel):
 class MessageResponse(BaseModel):
     question: str
     done: bool = False
+
+
+class BoilerplateResponse(BaseModel):
+    boilerplate: Optional[str] = None
+    supported: bool = True
 
 
 class RunCodeRequest(BaseModel):

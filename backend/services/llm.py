@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import os
 import json
+import re
 import httpx
 from typing import List
 
@@ -22,6 +23,8 @@ from langchain_core.output_parsers import StrOutputParser, JsonOutputParser
 from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
 from langchain_core.runnables import RunnableLambda
 from pydantic import BaseModel, Field
+
+from services import guardrail
 
 # ── env ──────────────────────────────────────────────────────────────────────
 GROQ_API_KEY   = os.environ.get("GROQ_API_KEY", "")
@@ -85,6 +88,7 @@ def _fallback_chat(messages: list[dict], max_tokens: int, temperature: float, js
         headers={"Authorization": f"Bearer {FALLBACK_API_KEY}", "Content-Type": "application/json"},
         json=payload,
         timeout=60,
+        follow_redirects=True,
     )
     resp.raise_for_status()
     return resp.json()["choices"][0]["message"]["content"].strip()
@@ -116,7 +120,11 @@ TRACK_PERSONAS = {
         "— once they have introduced themselves, naturally transition into a coding problem "
         "relevant to their background, then follow up on their approach, complexity, edge cases, "
         "and trade-offs one question at a time. The candidate has a live code editor open. "
-        "Keep responses to one or two sentences. Never break character or mention you are an AI."
+        "Keep responses to one or two sentences. Never break character or mention you are an AI. "
+        "CRITICAL: never state the time or space complexity of any solution (no Big-O, no "
+        "'runs in linear/constant time', etc.) — always ask the candidate to derive and justify "
+        "it themselves. If you'd normally say 'that's O(n)', instead ask 'what's the time "
+        "complexity of that, and why?'"
     ),
     "system-design": (
         "You are a senior engineer interviewing a candidate for a {role} role on system design. "
@@ -124,7 +132,10 @@ TRACK_PERSONAS = {
         "— once they have introduced themselves, naturally present a system design problem "
         "suited to their background, then probe their reasoning about scale, trade-offs, data "
         "models, and failure modes. Push back gently when they hand-wave a decision. "
-        "Keep responses to one or two sentences. Never break character or mention you are an AI."
+        "Keep responses to one or two sentences. Never break character or mention you are an AI. "
+        "CRITICAL: never reveal or recommend a specific architectural decision (which database, "
+        "caching strategy, queueing system, or scaling pattern to use) — always ask the candidate "
+        "to propose and defend their own choice instead of suggesting one yourself."
     ),
 }
 
@@ -192,40 +203,72 @@ def opening_message(track: str, role: str) -> str:
         raise
 
 
-def next_question(track: str, role: str, history: list[dict]) -> str:
+def next_question(track: str, role: str, history: list[dict], assigned_question: dict | None = None) -> str:
     """
     LangChain LCEL interview chain:
       ChatPromptTemplate(system + history + latest human turn)
       | ChatGroq
       | StrOutputParser
     Falls back to Ollama-cloud on Groq rate-limit / server error.
+
+    Output passes through the guardrail layer (services.guardrail) before it
+    reaches the candidate — see that module for why this exists.
+
+    assigned_question: for "technical" sessions, a problem pulled from the
+    curated question bank (services.question_bank) — when present, the
+    interviewer presents this exact problem instead of inventing one, so the
+    later test-runner can grade against verified canonical test cases.
     """
     system_prompt = TRACK_PERSONAS.get(track, TRACK_PERSONAS["behavioral"]).format(role=role)
+    if track == "technical" and assigned_question:
+        is_stdio = bool(assigned_question.get("tests") and "stdin" in assigned_question["tests"][0])
+        io_note = (
+            "The candidate must write a complete program that reads input from stdin and "
+            "prints the answer to stdout — not just a function — since this problem is graded "
+            "by running their program against raw input/output, the same way Codeforces does."
+            if is_stdio else
+            f"The candidate should implement it as a function/class named "
+            f"`{assigned_question.get('function_name') or 'the appropriate signature'}`."
+        )
+        system_prompt += (
+            f"\n\nThe coding problem assigned to this candidate is exactly this one — present it "
+            f"(you may paraphrase the wording, but keep the requirements identical) once their "
+            f"introduction is done, then follow up on their approach: {assigned_question['prompt']}\n\n{io_note}"
+        )
 
     # Split history: everything except the last candidate turn goes into
     # MessagesPlaceholder; the last candidate turn is the current "human" input.
     lc_history = _history_to_lc(history[:-1])  # all but last turn
     last_turn = history[-1]["content"] if history else ""
 
-    prompt = ChatPromptTemplate.from_messages([
-        ("system", system_prompt),
-        MessagesPlaceholder(variable_name="history"),
-        ("human", "{input}"),
-    ])
+    def _ask(temperature: float = 0.7, corrective: bool = False) -> str:
+        sys_prompt = system_prompt
+        if corrective:
+            sys_prompt += (
+                "\n\nIMPORTANT: your previous draft leaked information the candidate must "
+                "figure out themselves (an exact complexity or a specific architectural "
+                "recommendation). Rewrite it so it ONLY asks a question — never states the answer."
+            )
+        try:
+            p = ChatPromptTemplate.from_messages([
+                ("system", sys_prompt),
+                MessagesPlaceholder(variable_name="history"),
+                ("human", "{input}"),
+            ])
+            chain = p | _make_llm(temperature=temperature, max_tokens=200) | StrOutputParser()
+            return chain.invoke({"history": lc_history, "input": last_turn})
+        except Exception as exc:
+            status = getattr(exc, "status_code", None)
+            if status is None or status == 429 or (isinstance(status, int) and status >= 500):
+                raw_msgs = [{"role": "system", "content": sys_prompt}]
+                for m in lc_history:
+                    raw_msgs.append({"role": "assistant" if isinstance(m, AIMessage) else "user", "content": m.content})
+                raw_msgs.append({"role": "user", "content": last_turn})
+                return _fallback_chat(raw_msgs, max_tokens=200, temperature=temperature)
+            raise
 
-    try:
-        chain = prompt | _make_llm(temperature=0.7, max_tokens=200) | StrOutputParser()
-        return chain.invoke({"history": lc_history, "input": last_turn})
-    except Exception as exc:
-        status = getattr(exc, "status_code", None)
-        if status is None or status == 429 or (isinstance(status, int) and status >= 500):
-            # Build OpenAI-format messages for fallback
-            raw_msgs = [{"role": "system", "content": system_prompt}]
-            for m in lc_history:
-                raw_msgs.append({"role": "assistant" if isinstance(m, AIMessage) else "user", "content": m.content})
-            raw_msgs.append({"role": "user", "content": last_turn})
-            return _fallback_chat(raw_msgs, max_tokens=200, temperature=0.7)
-        raise
+    draft = _ask()
+    return guardrail.sanitize(draft, track, regenerate_fn=lambda: _ask(temperature=0.4, corrective=True))
 
 
 def evaluate_session(track: str, role: str, history: list[dict]) -> dict:
@@ -272,7 +315,11 @@ def evaluate_session(track: str, role: str, history: list[dict]) -> dict:
                 max_tokens=700, temperature=0.3, json_mode=True,
             )
             try:
-                return json.loads(raw)
+                # Some fallback providers wrap JSON in markdown fences even
+                # with response_format=json_object set — strip before parsing.
+                cleaned = re.sub(r"^```[a-z]*\n?", "", raw.strip())
+                cleaned = re.sub(r"\n?```$", "", cleaned).strip()
+                return json.loads(cleaned)
             except json.JSONDecodeError:
                 pass
         # Last-resort default

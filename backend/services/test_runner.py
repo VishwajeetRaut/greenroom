@@ -7,6 +7,7 @@ Two-step approach:
 """
 
 from __future__ import annotations
+import asyncio
 import json
 import re
 
@@ -18,7 +19,11 @@ You generate test cases for coding interview problems.
 Return ONLY a valid JSON array — no explanation, no markdown, no code fences.
 
 Each element must have exactly two string fields:
-  "call"     — the function call as it would appear in code, e.g. "two_sum([2,7,11,15], 9)"
+  "call"     — Python statements (separated by ";") ending in the expression to check, e.g.
+               "two_sum([2,7,11,15], 9)" for a plain function, or for a stateful object:
+               "obj = LRUCache(2); obj.put(1, 1); obj.put(2, 2); obj.get(1)"
+               Each test case is independent — always declare and assign a fresh object with
+               the exact same variable name ("obj") rather than reusing one from another case.
   "expected" — the expected return value as a literal, e.g. "[0, 1]"
 
 Generate exactly 6 test cases: 3 typical inputs first, then 3 edge cases.
@@ -81,6 +86,7 @@ def _python_harness(source: str, cases: list[dict]) -> str:
     return f'''{source}
 
 import json as _j
+import ast as _ast
 
 _cases = {cases_json}
 _visible = _cases[:3]
@@ -94,9 +100,24 @@ def _eq(a, b):
     except Exception:
         return False
 
+def _run_call(code):
+    """Supports multi-statement test cases (e.g. stateful objects: 'o = Foo(); o.put(1); o.get()'),
+    not just single expressions — Python's eval() alone only accepts one expression."""
+    tree = _ast.parse(code, mode="exec")
+    if not tree.body:
+        return None
+    last = tree.body[-1]
+    ns = globals()
+    if isinstance(last, _ast.Expr):
+        if len(tree.body) > 1:
+            exec(compile(_ast.Module(body=tree.body[:-1], type_ignores=[]), "<test>", "exec"), ns)
+        return eval(compile(_ast.Expression(body=last.value), "<test>", "eval"), ns)
+    exec(compile(tree, "<test>", "exec"), ns)
+    return None
+
 for _i, _tc in enumerate(_visible):
     try:
-        _result   = eval(_tc["call"])
+        _result   = _run_call(_tc["call"])
         _expected = eval(_tc["expected"])
         _passed   = _eq(_result, _expected)
         _out = {{"id": _i+1, "label": f"Case {{_i+1}}", "input": _tc["call"], "expected": _tc["expected"], "passed": _passed}}
@@ -109,7 +130,7 @@ for _i, _tc in enumerate(_visible):
 
 for _i, _tc in enumerate(_hidden):
     try:
-        _result   = eval(_tc["call"])
+        _result   = _run_call(_tc["call"])
         _expected = eval(_tc["expected"])
         _passed   = _eq(_result, _expected)
         print(_j.dumps({{"id": _i+4, "label": f"Hidden {{_i+1}}", "hidden": True, "passed": _passed}}))
@@ -161,14 +182,22 @@ _hidden.forEach((_tc, _i) => {{
 '''
 
 
-def generate_harness(language: str, source: str, history: list[dict]) -> str | None:
-    problem = _extract_problem(history)
-    if not problem:
-        return None
-
-    cases = _generate_cases(problem)
-    if not cases:
-        return None
+def generate_harness(language: str, source: str, history: list[dict], assigned_question: dict | None = None) -> str | None:
+    """
+    Prefers canonical, pre-verified test cases from the curated question bank
+    (assigned_question — see services/question_bank.py) when the session was
+    given one of those problems. Only falls back to LLM-generated cases for
+    ad hoc problems the interviewer invented on its own.
+    """
+    if assigned_question and language in (assigned_question.get("languages") or []):
+        cases = assigned_question["tests"]
+    else:
+        problem = _extract_problem(history)
+        if not problem:
+            return None
+        cases = _generate_cases(problem)
+        if not cases:
+            return None
 
     if language == "python":
         return _python_harness(source, cases)
@@ -177,13 +206,103 @@ def generate_harness(language: str, source: str, history: list[dict]) -> str | N
     return None  # Java/C++ not yet supported — caller shows appropriate message
 
 
-# ── Result parser ─────────────────────────────────────────────────────────────
+# ── stdin/stdout test mode — language-agnostic, used by the CodeContests-derived
+# entries in the question bank (see services/question_bank.py). Unlike the
+# call/expected mode above, no harness injection is needed: the candidate's raw
+# source IS the program, run once per test case with that case's stdin, and its
+# stdout is diffed directly. This is the same protocol Codeforces/Judge0 use,
+# and it works identically for Python/JS/Java/C++ with zero per-language code.
+
+def _normalize_output(text: str) -> str:
+    return "\n".join(line.rstrip() for line in (text or "").strip().splitlines())
+
+
+async def run_stdio_tests(language: str, version: str, source: str, tests: list[dict], visible_count: int = 3) -> dict:
+    from services import piston
+
+    async def _run_one(tc: dict) -> dict:
+        result = await piston.run_code(language, version, source, stdin=tc["stdin"])
+        raw = result.get("run", {})
+        stdout, stderr = raw.get("stdout", ""), raw.get("stderr", "")
+        crashed = bool(stderr) and raw.get("code", 0) != 0
+        passed = (not crashed) and _normalize_output(stdout) == _normalize_output(tc["stdout"])
+        return {"passed": passed, "stdout": stdout, "stderr": stderr, "crashed": crashed}
+
+    results = await asyncio.gather(*(_run_one(tc) for tc in tests))
+
+    # A real compile/syntax error fails identically on every test case (it never
+    # gets to read input at all). A runtime exception triggered by a specific
+    # input crashes on some cases but not others. That distinction is the only
+    # reliable signal we have, since Piston/Wandbox bundle compile+run per call.
+    if results and all(r["crashed"] for r in results):
+        err = results[0]["stderr"]
+        return {
+            "status": "compile_error",
+            "compile_error": err[:1500],
+            "error_type": _classify_error(err),
+            "visible_tests": [], "hidden_tests": [], "passed": 0, "total": 0,
+        }
+
+    visible_tests, hidden_tests = [], []
+    passed = 0
+    any_crash = False
+    for i, (tc, r) in enumerate(zip(tests, results)):
+        if r["passed"]:
+            passed += 1
+        if r["crashed"] and not r["passed"]:
+            any_crash = True
+        if i < visible_count:
+            entry = {
+                "id": i + 1, "label": f"Case {i + 1}",
+                "input": tc["stdin"], "expected": tc["stdout"],
+                "output": tc["stdout"] if r["passed"] else r["stdout"],
+                "passed": r["passed"],
+            }
+            if not r["passed"]:
+                entry["error"] = (
+                    f"Program crashed:\n{r['stderr']}" if r["crashed"]
+                    else f"Expected:\n{tc['stdout']}\n\nGot:\n{r['stdout']}"
+                )
+            visible_tests.append(entry)
+        else:
+            hidden_tests.append({"id": i + 1, "passed": r["passed"]})
+
+    total = len(tests)
+    status = "accepted" if passed == total else ("runtime_error" if any_crash else "wrong_answer")
+
+    return {
+        "status": status,
+        "visible_tests": visible_tests,
+        "hidden_tests": hidden_tests,
+        "passed": passed,
+        "total": total,
+        "error_type": "permanent" if status != "accepted" else None,
+    }
+
+
+# ── Result parser (call/expected mode) ────────────────────────────────────────
+
+_TRANSIENT_MARKERS = (
+    "currently unavailable", "timed out", "timeout", "connection",
+    "temporarily unavailable", "rate limit", "503", "502", "service unavailable",
+)
+
+
+def _classify_error(text: str) -> str:
+    """'transient' — an infra/sandbox problem, safe to retry as-is.
+    'permanent' — the candidate's own code raised this; retrying won't help."""
+    lowered = (text or "").lower()
+    if any(marker in lowered for marker in _TRANSIENT_MARKERS):
+        return "transient"
+    return "permanent"
+
 
 def parse_results(stdout: str, stderr: str) -> dict:
     if stderr and not stdout.strip():
         return {
             "status": "compile_error",
             "compile_error": stderr[:1500],
+            "error_type": _classify_error(stderr),
             "visible_tests": [], "hidden_tests": [], "passed": 0, "total": 0,
         }
 
@@ -222,13 +341,16 @@ def parse_results(stdout: str, stderr: str) -> dict:
     total = len(visible_tests) + len(hidden_tests)
 
     if total == 0:
+        msg = stderr[:1500] if stderr else "No test output produced. Check your code for syntax errors."
         return {
             "status": "compile_error",
-            "compile_error": stderr[:1500] if stderr else "No test output produced. Check your code for syntax errors.",
+            "compile_error": msg,
+            "error_type": _classify_error(stderr) if stderr else "permanent",
             "visible_tests": [], "hidden_tests": [], "passed": 0, "total": 0,
         }
 
-    any_error = any(r.get("error") for r in visible_tests)
+    errors = [r.get("error") for r in visible_tests if r.get("error")]
+    any_error = bool(errors)
     status = "accepted" if passed == total else ("runtime_error" if any_error else "wrong_answer")
 
     return {
@@ -237,4 +359,5 @@ def parse_results(stdout: str, stderr: str) -> dict:
         "hidden_tests":  hidden_tests,
         "passed":        passed,
         "total":         total,
+        "error_type":    _classify_error(errors[0]) if errors else None,
     }

@@ -9,6 +9,7 @@ create table if not exists sessions (
   overall_score int,
   summary text,
   star_analysis jsonb,
+  assigned_question_id text,
   created_at timestamptz not null default now(),
   ended_at timestamptz,
   updated_at timestamptz not null default now()
@@ -71,6 +72,31 @@ create policy "Users can view evaluations from their sessions"
 create policy "Users can delete their own sessions"
   on sessions for delete
   using (auth.uid() = user_id);
+
+-- Curated technical question bank. Backend reads this table first (see
+-- services/question_bank.py) and falls back to the bundled JSON seed only if
+-- this table is empty/unreachable — so the bank can be updated by inserting
+-- rows here at any time, with no backend redeploy required.
+create table if not exists questions (
+  id text primary key,
+  track text not null,
+  topic text,
+  difficulty text,
+  title text not null,
+  prompt text not null,
+  function_name text not null,
+  languages text[] not null default array['python'],
+  tests jsonb not null,
+  created_at timestamptz not null default now()
+);
+
+alter table questions enable row level security;
+drop policy if exists "Anyone can read questions" on questions;
+create policy "Anyone can read questions"
+  on questions for select
+  using (true);
+
+create index if not exists idx_questions_track on questions (track);
 
 -- Indexes
 create index if not exists idx_messages_session_id on messages (session_id);
