@@ -40,6 +40,8 @@ def main():
             "function_name": q["function_name"],
             "languages": q["languages"],
             "tests": q["tests"],
+            "constraints": q.get("constraints"),
+            "examples": q.get("examples"),
         }
         sb.table("questions").upsert(row).execute()
         print(f"  upserted {q['id']}")

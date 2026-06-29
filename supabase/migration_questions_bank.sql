@@ -33,3 +33,9 @@ alter table questions alter column function_name drop not null;
 -- (call/expected) problems, keyed by language: {"java": {boilerplate, harness}, "cpp": {...}}.
 -- See services/harness_generator.py — populated on first use, not upfront.
 alter table questions add column if not exists harnesses jsonb;
+
+-- Structured constraints/examples extracted from each problem's own prompt
+-- text (not invented — see scripts/extract_constraints_examples.py), so the
+-- frontend can render them as distinct panels instead of one prose blob.
+alter table questions add column if not exists constraints jsonb;
+alter table questions add column if not exists examples jsonb;
