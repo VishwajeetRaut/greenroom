@@ -10,12 +10,7 @@ _WANDBOX_COMPILER = {
     "python": "cpython-3.12.7",
     "node":   "nodejs-20.17.0",
     "java":   "openjdk-jdk-21+35",
-    "gcc":    "gcc-head",       # gcc-head compiles C++ by default; gcc-13.2.0 defaults to C (.c)
-}
-
-# Extra Wandbox payload fields per language
-_WANDBOX_EXTRA: dict[str, dict] = {
-    "gcc": {"compiler-option-raw": "-std=c++17"},
+    "gcc":    "gcc-13.2.0",
 }
 
 _UNAVAILABLE = {
@@ -49,9 +44,10 @@ async def _wandbox(language: str, source: str, stdin: str) -> dict | None:
         return None
     try:
         async with httpx.AsyncClient(timeout=30) as client:
-            payload = {"code": source, "compiler": compiler, "stdin": stdin}
-            payload.update(_WANDBOX_EXTRA.get(language, {}))
-            resp = await client.post(_WANDBOX_URL, json=payload)
+            resp = await client.post(
+                _WANDBOX_URL,
+                json={"code": source, "compiler": compiler, "stdin": stdin},
+            )
             resp.raise_for_status()
             data = resp.json()
             stderr = data.get("program_error") or data.get("compiler_error") or ""
