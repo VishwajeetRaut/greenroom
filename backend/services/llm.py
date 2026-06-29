@@ -112,14 +112,11 @@ TRACK_PERSONAS = {
     ),
     "technical": (
         "You are a friendly but rigorous technical interviewer for a {role} role. "
-        "The coding problem for this session is: **{problem_title}** (Difficulty: {problem_difficulty}). "
-        "Topics: {problem_topics}. "
-        "After the candidate has introduced themselves, present this problem in full — "
-        "write out the complete description, examples with input/output, and constraints exactly "
-        "as they appear on LeetCode. Then follow up on their approach, time/space complexity, "
-        "edge cases, and trade-offs one question at a time. "
-        "The candidate has a live code editor open. "
-        "Keep follow-up responses to one or two sentences. Never break character or mention you are an AI."
+        "The conversation so far may include a brief greeting and the candidate's introduction "
+        "— once they have introduced themselves, naturally transition into a coding problem "
+        "relevant to their background, then follow up on their approach, complexity, edge cases, "
+        "and trade-offs one question at a time. The candidate has a live code editor open. "
+        "Keep responses to one or two sentences. Never break character or mention you are an AI."
     ),
     "system-design": (
         "You are a senior engineer interviewing a candidate for a {role} role on system design. "
@@ -195,7 +192,7 @@ def opening_message(track: str, role: str) -> str:
         raise
 
 
-def next_question(track: str, role: str, history: list[dict], problem: dict | None = None) -> str:
+def next_question(track: str, role: str, history: list[dict]) -> str:
     """
     LangChain LCEL interview chain:
       ChatPromptTemplate(system + history + latest human turn)
@@ -203,18 +200,7 @@ def next_question(track: str, role: str, history: list[dict], problem: dict | No
       | StrOutputParser
     Falls back to Ollama-cloud on Groq rate-limit / server error.
     """
-    persona = TRACK_PERSONAS.get(track, TRACK_PERSONAS["behavioral"])
-    if track == "technical" and problem:
-        system_prompt = persona.format(
-            role=role,
-            problem_title=problem.get("title", "a coding problem"),
-            problem_difficulty=problem.get("difficulty", "Medium"),
-            problem_topics=", ".join(problem.get("topics", [])[:4]),
-        )
-    else:
-        system_prompt = persona.format(role=role) if track != "technical" else persona.format(
-            role=role, problem_title="a coding problem", problem_difficulty="Medium", problem_topics="Data Structures"
-        )
+    system_prompt = TRACK_PERSONAS.get(track, TRACK_PERSONAS["behavioral"]).format(role=role)
 
     # Split history: everything except the last candidate turn goes into
     # MessagesPlaceholder; the last candidate turn is the current "human" input.
@@ -240,69 +226,6 @@ def next_question(track: str, role: str, history: list[dict], problem: dict | No
             raw_msgs.append({"role": "user", "content": last_turn})
             return _fallback_chat(raw_msgs, max_tokens=200, temperature=0.7)
         raise
-
-
-_PROBLEM_FORMAT_SYSTEM = """\
-You extract DSA coding problems from interviewer messages.
-
-If the message introduces a NEW coding problem, return a JSON object with this exact shape:
-{
-  "title": "Short problem title",
-  "difficulty": "Easy",
-  "description": "Full problem description",
-  "examples": [
-    {"input": "nums = [2,7,11,15], target = 9", "output": "[0,1]", "explanation": "nums[0] + nums[1] == 9"}
-  ],
-  "constraints": ["2 <= nums.length <= 10^4", "-10^9 <= nums[i] <= 10^9"],
-  "boilerplate": {
-    "python": "def two_sum(nums, target):\\n    pass",
-    "javascript": "function twoSum(nums, target) {\\n    \\n}",
-    "java": "class Solution {\\n    public int[] twoSum(int[] nums, int target) {\\n        \\n    }\\n}",
-    "cpp": "#include <bits/stdc++.h>\\nusing namespace std;\\n\\nclass Solution {\\npublic:\\n    vector<int> twoSum(vector<int>& nums, int target) {\\n        \\n    }\\n};"
-  }
-}
-
-If the message is a follow-up question, hint, feedback, or does NOT introduce a new coding problem, return exactly: null
-
-Reply ONLY with the JSON object or the word null. No explanation, no markdown fences."""
-
-
-def format_problem_statement(question: str) -> dict | None:
-    """Parse a technical interviewer message into a structured LeetCode-style problem. Returns None if not a coding problem."""
-    prompt = f"Interviewer message:\n{question}"
-    msgs = [
-        {"role": "system", "content": _PROBLEM_FORMAT_SYSTEM},
-        {"role": "user",   "content": prompt},
-    ]
-    try:
-        llm = _make_llm(temperature=0.1, max_tokens=800)
-        from langchain_core.messages import SystemMessage, HumanMessage
-        result = llm.invoke([SystemMessage(content=_PROBLEM_FORMAT_SYSTEM), HumanMessage(content=prompt)])
-        raw = _strip_fences_json(result.content.strip())
-    except Exception as exc:
-        status = getattr(exc, "status_code", None)
-        if status is None or status == 429 or (isinstance(status, int) and status >= 500):
-            raw = _strip_fences_json(_fallback_chat(msgs, max_tokens=800, temperature=0.1))
-        else:
-            return None
-
-    if raw.lower() == "null" or not raw:
-        return None
-    try:
-        data = json.loads(raw)
-        if isinstance(data, dict) and "title" in data:
-            return data
-    except json.JSONDecodeError:
-        pass
-    return None
-
-
-def _strip_fences_json(text: str) -> str:
-    import re
-    text = text.strip()
-    text = re.sub(r"^```[a-z]*\n?", "", text)
-    text = re.sub(r"\n?```$", "", text)
-    return text.strip()
 
 
 def evaluate_session(track: str, role: str, history: list[dict]) -> dict:
