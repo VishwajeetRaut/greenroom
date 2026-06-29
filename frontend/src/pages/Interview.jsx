@@ -128,12 +128,12 @@ export default function Interview() {
 
     async function init() {
       try {
-        const { data: userData } = await supabase.auth.getUser();
-        const res = await api.startSession({
-          track,
-          role: "Software Engineer",
-          user_id: userData?.user?.id
-        });
+        const { data: { session } } = await supabase.auth.getSession();
+        if (!session) {
+          navigate("/login", { replace: true });
+          return;
+        }
+        const res = await api.startSession({ track, role: "Software Engineer" });
         setSessionId(res.session_id);
         setMessages([{ role: "interviewer", text: res.question }]);
         speakIfUnmuted(res.question);
