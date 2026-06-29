@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import os
 import json
+import re
 import httpx
 from typing import List
 
@@ -87,6 +88,7 @@ def _fallback_chat(messages: list[dict], max_tokens: int, temperature: float, js
         headers={"Authorization": f"Bearer {FALLBACK_API_KEY}", "Content-Type": "application/json"},
         json=payload,
         timeout=60,
+        follow_redirects=True,
     )
     resp.raise_for_status()
     return resp.json()["choices"][0]["message"]["content"].strip()
@@ -313,7 +315,11 @@ def evaluate_session(track: str, role: str, history: list[dict]) -> dict:
                 max_tokens=700, temperature=0.3, json_mode=True,
             )
             try:
-                return json.loads(raw)
+                # Some fallback providers wrap JSON in markdown fences even
+                # with response_format=json_object set — strip before parsing.
+                cleaned = re.sub(r"^```[a-z]*\n?", "", raw.strip())
+                cleaned = re.sub(r"\n?```$", "", cleaned).strip()
+                return json.loads(cleaned)
             except json.JSONDecodeError:
                 pass
         # Last-resort default
