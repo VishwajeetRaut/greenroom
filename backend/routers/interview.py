@@ -14,7 +14,7 @@ from models import (
     EndSessionRequest,
     EndSessionResponse,
 )
-from services import llm, piston
+from services import llm, piston, problems as problem_service
 from services import test_runner
 from services.supabase_client import get_supabase
 
@@ -89,10 +89,13 @@ def start_session(req: StartSessionRequest):
     session_id = str(uuid.uuid4())
     greeting = llm.opening_message(req.track, req.role)
 
+    problem = problem_service.pick() if req.track == "technical" else None
+
     SESSIONS[session_id] = {
         "track": req.track,
         "role": req.role,
         "history": [{"role": "interviewer", "content": greeting}],
+        "problem": problem,
     }
 
     _persist_session_start(session_id, req.user_id, req.track, req.role, greeting)
@@ -113,12 +116,19 @@ def post_message(req: MessageRequest):
     session["history"].append({"role": "candidate", "content": candidate_content})
     _persist_message(req.session_id, "candidate", req.message)
 
-    question = llm.next_question(session["track"], session["role"], session["history"])
+    question = llm.next_question(session["track"], session["role"], session["history"], session.get("problem"))
 
     session["history"].append({"role": "interviewer", "content": question})
     _persist_message(req.session_id, "interviewer", question)
 
-    return MessageResponse(question=question)
+    problem = None
+    if session["track"] == "technical":
+        detected = llm.format_problem_statement(question)
+        if detected:
+            session["current_problem"] = detected
+            problem = detected
+
+    return MessageResponse(question=question, problem=problem)
 
 
 @router.post("/code/run")
@@ -135,11 +145,7 @@ async def run_tests(req: RunTestsRequest):
 
     harness = test_runner.generate_harness(req.language, req.source, session["history"])
     if harness is None:
-        lang = req.language
-        if lang not in ("python", "node"):
-            msg = f"Test cases are not yet supported for {lang}. Switch to Python or JavaScript to use the test runner."
-        else:
-            msg = "No coding problem has been assigned yet — wait for the interviewer to give you a problem first."
+        msg = "No coding problem has been assigned yet — wait for the interviewer to give you a problem first."
         return RunTestsResponse(
             status="compile_error",
             compile_error=msg,
