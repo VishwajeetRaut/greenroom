@@ -86,6 +86,7 @@ export default function Interview() {
   const [testResults, setTestResults] = useState(null);
   const [revealedCount, setRevealedCount] = useState(0);
   const [running, setRunning] = useState(false);
+  const [slowHint, setSlowHint] = useState(false);
 
   const { isSupported, isListening, transcript, interimTranscript, start, stop, reset } =
     useSpeechRecognition();
@@ -197,6 +198,14 @@ export default function Interview() {
     setRunning(true);
     setTestResults(null);
     setRevealedCount(0);
+    setSlowHint(false);
+
+    // Java/C++ harnesses for most problems are generated and sandbox-verified
+    // on first use, then cached — only the first run for a given problem +
+    // language combination is slow, but it can take up to a minute. Without
+    // this, that first run looks indistinguishable from a hang.
+    const slowHintTimer =
+      lang.id === "java" || lang.id === "cpp" ? setTimeout(() => setSlowHint(true), 5000) : null;
 
     try {
       const res = await api.runTests({ session_id: sessionId, language: lang.piston, version: lang.version, source: code });
@@ -217,6 +226,8 @@ export default function Interview() {
         total: 7,
       });
     } finally {
+      if (slowHintTimer) clearTimeout(slowHintTimer);
+      setSlowHint(false);
       setRunning(false);
     }
   };
@@ -396,6 +407,13 @@ export default function Interview() {
                       </span>
                     ) : "Run code"}
                   </button>
+
+                  {running && slowHint && (
+                    <p className="mt-3 text-xs text-white/50">
+                      Preparing a verified test environment for this language — first run on a
+                      new problem can take up to a minute. Future runs will be instant.
+                    </p>
+                  )}
 
                   {running && (
                     <div className="mt-3 space-y-2">
