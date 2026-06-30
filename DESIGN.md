@@ -175,24 +175,7 @@ The frontend only ever holds the Supabase **anon key** (public, safe to expose â
 
 ---
 
-### 1.6 Next Steps & Owners
-
-| Action | Owner | Target |
-|---|---|---|
-| Add seniority and role selector to session start | Dev team | Week 2 |
-| Parameterise LangChain personas by level and role | Dev team | Week 2 |
-| Integrate System Design track end-to-end (canvas â†’ LLM probe) | Dev team | Week 3 |
-| Source 20 transcripts for benchmark | Dev team | Week 4 |
-| Recruit 3 human raters | Team lead | Week 4 |
-| Run benchmark and fill metrics table | Dev team | Week 5 |
-| Add pytest backend test suite and Vitest frontend suite | Dev team | Week 6 |
-| Wire tests as required CI gate before deploy | Dev team | Week 6 |
-| Add structured JSON logging + Sentry | Dev team | Week 7 |
-| Move rate limiter to Postgres-backed table | Dev team | Week 7 |
-
----
-
-### 1.7 Links & References
+### 1.6 Links & References
 
 | Resource | Link |
 |---|---|
