@@ -68,7 +68,7 @@ Greenroom is a three-service web application. The candidate interacts through a 
 - Delete session
 - Supabase Auth (email/password + PKCE OAuth)
 - Guardrail filter (four-layer defense against answer leaks)
-- Question bank — 210 LeetCode problems sourced from the open-source LeetCodeDataset (Kaggle, newfacade, MIT licence, arXiv:2504.14655), imported via `scripts/import_leetcode_dataset.py`, with structured constraints and examples extracted via `scripts/extract_constraints_examples.py`, seeded locally and synced to Supabase
+- Question bank — 295 verified problems: 210 from LeetCodeDataset (Kaggle, newfacade, MIT, arXiv:2504.14655) imported via `scripts/import_leetcode_dataset.py`, 77 from CodeContests (DeepMind, CC-BY-4.0) imported via `scripts/import_codecontests.py`, and 8 hand-written — every test case verified by running a canonical solution through a sandboxed container before import; structured constraints and examples extracted via `scripts/extract_constraints_examples.py`
 - Dynamic interviewer — LLM-driven question selection: `question_generator.py` decides between using an existing bank problem or generating a new one, verifies it with dual-solution sandbox execution before persisting
 - Groq → Ollama Cloud LLM fallback
 - Self-hosted Piston + Wandbox fallback for code execution
@@ -211,7 +211,7 @@ The frontend only ever holds the Supabase **anon key** (public, safe to expose �
 
 ---
 
-## 3. Implementation Plan & Guidance
+## 2. Implementation Plan & Guidance
 
 ### What we're building
 
@@ -227,12 +227,6 @@ A web app where candidates pick an interview track, talk to an AI interviewer, o
 - Code execution uses Piston primary and Wandbox fallback transparently — the candidate never sees which service ran their code.
 - Java/C++ harnesses are generated on first request and cached; the candidate sees a loading message while this happens.
 
-### Developer Request Flow
-
-This diagram shows how every HTTP request moves through the backend — which file handles each step, where decisions are made, and which external services are called.
-
-![Developer Request Flow](docs/diagrams/developer-flow.png)
-
 ### Code structure
 
 ```
@@ -247,7 +241,7 @@ backend/
     llm.py                   # LangChain LCEL chains: opening, next_question, evaluate_session
     piston.py                # run_code(): Piston primary → Wandbox fallback
     rate_limit.py            # Sliding window per-user rate limiter (in-memory)
-    question_bank.py         # 210 LeetCode problems, Supabase + local JSON seed
+    question_bank.py         # 295 problems (210 LeetCode + 77 CodeContests + 8 hand-written), Supabase + local JSON seed
     question_generator.py    # LLM selects existing or generates new problem with dual-solution verification
     test_runner.py           # call/expected and stdin/stdout test modes, harness injection
     harness_generator.py     # Lazy Java/C++ harness build via LLM, sandbox-verified, cached
@@ -255,7 +249,7 @@ backend/
     supabase_client.py       # Singleton Supabase client using service-role key
     tts.py                   # edge-tts wrapper → audio/mpeg stream
   data/
-    question_bank.json       # 210 LeetCode problems (local seed, 17,651 lines)
+    question_bank.json       # 295 problems — 210 LeetCode + 77 CodeContests + 8 hand-written (local seed)
 
 frontend/src/
   pages/
@@ -289,7 +283,7 @@ frontend/src/
 | Guardrail filter — 4-layer answer-leak defense | ✅ Done |
 | System Design track — Excalidraw canvas | ✅ Done |
 | Groq → Ollama Cloud LLM fallback | ✅ Done |
-| Question bank — 210 LeetCode problems | ✅ Done |
+| Question bank — 295 problems (210 LeetCode + 77 CodeContests + 8 hand-written) | ✅ Done |
 | Question generator — LLM selects or generates with dual verification | ✅ Done |
 | Session history + delete on dashboard | ✅ Done |
 | GitHub Actions CI/CD with OIDC (no stored credentials) | ✅ Done |
@@ -320,7 +314,7 @@ Every failure path has a defined behaviour — nothing silently crashes.
 
 ---
 
-## 4. Security Review
+## 3. Security Review
 
 **What's in place:**
 - Every request validated server-side via `supabase.auth.get_user(token)` — JWT never decoded locally
@@ -338,86 +332,26 @@ Piston's `isolate` sandbox requires `--privileged` Docker mode for full namespac
 
 ---
 
-## 5. Integration & E2E Validation
+## 4. Testing & Observability
 
-Manual end-to-end testing has been done on the live Azure deployment across all three tracks. No automated test suite exists yet.
+**Testing — current state:** Manual end-to-end testing done on the live Azure deployment across all three tracks. No automated suite yet.
 
-**Planned:**
-- `pytest` with `httpx.AsyncClient` for all backend endpoints — start with ownership checks, rate limiter behaviour, and Pydantic boundary conditions
-- `Vitest` for frontend component behaviour
-- Architecture fitness function tests: assert frontend never imports `SUPABASE_SERVICE_ROLE_KEY`, assert every session endpoint calls `_check_ownership`, assert schema matches `supabase/schema.sql`
-- All tests wired as a required CI check that must pass before the Docker build step runs
+**Testing — planned:**
+- `pytest` + `httpx.AsyncClient` for backend endpoints — ownership checks, rate limiter, Pydantic boundary conditions
+- `Vitest` for frontend components
+- Architecture fitness functions: frontend never imports `SERVICE_ROLE_KEY`, every session endpoint calls `_check_ownership`, schema matches `supabase/schema.sql`
+- All tests as a required CI gate before the Docker build step
 
----
+**Observability — planned:**
+- Structured JSON logging per request: endpoint, latency, LLM provider used, execution tier used, error type — never log tokens, message content, or source code
+- Sentry free tier for error tracking
+- Key metrics via Azure Log Analytics (already captures stdout for free): session completion rate, LLM fallback rate, Piston vs Wandbox usage, guardrail trigger rate, p95 latency on `/interview/message` and `/interview/code/test`
 
-## 6. Metrics & Dashboard
-
-Not yet implemented. Azure Container Apps already streams stdout to Log Analytics for free.
-
-**Planned metrics:**
-- Session start count per track per day
-- Session completion rate
-- Average overall score per track
-- Code execution tier usage (Piston vs Wandbox vs failure rate)
-- LLM fallback rate (Groq vs Ollama)
-- Guardrail trigger rate (how often answers are being leaked)
-- p95 response latency on `/interview/message` and `/interview/code/test`
+**Privacy:** Candidates can delete all session data at any time via `DELETE /api/interview/{id}`. Source code is sent to Wandbox when Piston is unavailable — this is disclosed. No PII is logged.
 
 ---
 
-## 7. Logging & Telemetry
-
-Not yet implemented.
-
-**Plan:**
-- Switch to structured JSON logging (Python `logging` with a JSON formatter)
-- Log per request: endpoint, latency, LLM provider used, code execution tier used, error type if any
-- Never log: JWT tokens, full message content, source code, any user-identifiable data beyond a hashed user ID
-- Add Sentry free tier for error tracking (5k events/month covers this scale)
-
----
-
-## 8. Alerting
-
-Not yet set up. Once logging is in place:
-- Alert on error rate > 5% over 5 minutes
-- Alert on p95 latency > 10s on LLM endpoints  
-- Alert on consecutive Piston failures (Wandbox fallback active)
-
----
-
-## 9. Accessibility Review
-
-Not yet done. Items to check before marking complete:
-- Keyboard navigation through the full interview flow
-- Screen reader compatibility for the chat interface and scorecard
-- WCAG AA colour contrast ratios on results page
-- Monaco editor has known screen reader limitations — document them and provide a plain textarea fallback for candidates who need it
-
----
-
-## 10. Privacy Review
-
-**What personal data we hold:**
-
-| Data | Where | Who can access | Deleted when |
-|---|---|---|---|
-| Email address | Supabase Auth (managed by Supabase) | Supabase only | Account deleted |
-| Session transcripts | Supabase `messages` table | Authenticated owner only (RLS) | User deletes session |
-| Evaluation scores | Supabase `evaluations` table | Authenticated owner only (RLS) | User deletes session |
-| Source code submissions | Sent to Piston/Wandbox for execution | Not stored by us | Never stored |
-
-Candidates can delete all their session data at any time via `DELETE /api/interview/{id}`. Source code is sent to Wandbox (a public third party) when Piston is unavailable — this should be disclosed.
-
----
-
-## 11. Localization Review
-
-English only for V1. No localization work planned until a second language is requested.
-
----
-
-## 12. Deployment & Rollout
+## 5. Deployment & Rollout
 
 ### Live URLs
 
@@ -478,7 +412,7 @@ VITE_API_URL=/api                      # Proxied by Vite dev server locally
 
 ---
 
-## 13. Documentation & WIKI
+## 6. Documentation & WIKI
 
 - [x] `README.md` — local setup, env var reference, how to run both services
 - [x] `DEPLOYMENT.md` — full Azure Container Apps deployment guide with cost breakdown
@@ -526,7 +460,7 @@ The first 3 test cases are shown to the candidate as "visible" (with input, expe
 
 ---
 
-## Appendix C: Data Model
+## Appendix B: Data Model
 
 ```sql
 sessions (
@@ -589,7 +523,7 @@ questions (
 
 ---
 
-## Appendix D: API Reference
+## Appendix C: API Reference
 
 ### Interview — `/api/interview`
 
@@ -619,7 +553,7 @@ All endpoints (except `/api/health`) require `Authorization: Bearer <JWT>`.
 
 ---
 
-## Appendix E: Azure Migration Path
+## Appendix D: Azure Migration Path
 
 Every component has a direct Azure equivalent. Moving to Azure-native services is configuration only — no architectural rewrites.
 
