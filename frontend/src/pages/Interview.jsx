@@ -163,15 +163,37 @@ export default function Interview() {
                 <SystemDesignBoard ref={boardRef} />
               </Suspense>
             ) : (
-              <div className="p-6">
-                <h2 className="font-display text-xl">During this session</h2>
-                <ul className="mt-4 space-y-3 text-sm text-mute">
-                  <li>Speak naturally. The interviewer responds to what you actually say.</li>
-                  <li>Take a breath before answering. There's no penalty for a pause.</li>
-                  <li>End the session whenever you're ready for your feedback report.</li>
-                </ul>
-              </div>
-            )}
+  <div className="flex h-full flex-col p-6">
+    <h2 className="font-display text-xl">During this session</h2>
+    <p className="mt-1 text-xs text-mute">Tips to get the most out of your practice</p>
+
+    <div className="mt-6 space-y-3">
+      <div className="rounded-xl border border-white/5 bg-panelLight/40 p-4">
+        <p className="text-sm font-medium text-cream">🎙 Speak naturally</p>
+        <p className="mt-1 text-xs text-mute">The interviewer responds to what you actually say — no scripted replies.</p>
+      </div>
+      <div className="rounded-xl border border-white/5 bg-panelLight/40 p-4">
+        <p className="text-sm font-medium text-cream">⏸ Pause when you need to</p>
+        <p className="mt-1 text-xs text-mute">There's no penalty for taking a breath before answering.</p>
+      </div>
+      <div className="rounded-xl border border-white/5 bg-panelLight/40 p-4">
+        <p className="text-sm font-medium text-cream">⭐ Use the STAR method</p>
+        <p className="mt-1 text-xs text-mute">Structure your answers — Situation, Task, Action, Result — for clearer storytelling.</p>
+      </div>
+      <div className="rounded-xl border border-white/5 bg-panelLight/40 p-4">
+        <p className="text-sm font-medium text-cream">🏁 End when you're ready</p>
+        <p className="mt-1 text-xs text-mute">Hit "End session" whenever you want your full feedback report.</p>
+      </div>
+    </div>
+
+    <div className="mt-auto pt-6">
+      <div className="rounded-xl border border-amber/20 bg-amber/5 p-4">
+        <p className="text-xs font-medium text-amber">Reminder</p>
+        <p className="mt-1 text-xs text-mute">Your session is being recorded for feedback. Be as detailed as you would in a real interview.</p>
+      </div>
+    </div>
+  </div>
+)}
           </section>
 
         </div>

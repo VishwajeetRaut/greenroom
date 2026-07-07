@@ -326,6 +326,14 @@ def next_question(track: str, role: str, history: list[dict], assigned_question:
     return result
 
 
+def _reconcile_score(result: dict) -> None:
+    """Replace the LLM's self-reported overall_score with the mean of the
+    per-category scores so the number always matches the written critique."""
+    scores = [e["score"] for e in result.get("evaluations", []) if isinstance(e.get("score"), (int, float))]
+    if scores:
+        result["overall_score"] = round(sum(scores) / len(scores))
+
+
 def evaluate_session(track: str, role: str, history: list[dict]) -> dict:
     """
     LangChain LCEL evaluation chain:
@@ -357,7 +365,8 @@ def evaluate_session(track: str, role: str, history: list[dict]) -> dict:
         result = chain.invoke(lc_messages)
         # Pydantic model → plain dict for the rest of the app
         if hasattr(result, "model_dump"):
-            return result.model_dump()
+            result = result.model_dump()
+        _reconcile_score(result)
         return result
     except Exception as exc:
         status = getattr(exc, "status_code", None)
@@ -374,7 +383,9 @@ def evaluate_session(track: str, role: str, history: list[dict]) -> dict:
                 # with response_format=json_object set — strip before parsing.
                 cleaned = re.sub(r"^```[a-z]*\n?", "", raw.strip())
                 cleaned = re.sub(r"\n?```$", "", cleaned).strip()
-                return json.loads(cleaned)
+                result = json.loads(cleaned)
+                _reconcile_score(result)
+                return result
             except json.JSONDecodeError:
                 pass
         # Last-resort default
