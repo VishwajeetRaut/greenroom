@@ -12,7 +12,7 @@ describe("api module surface", () => {
     import.meta.env.VITE_SUPABASE_ANON_KEY = "anon-key-test";
 
     // Dynamically import to pick up the stubbed env
-    const { api } = await import("../lib/api.js");
+    const { api } = await import("../lib/api.ts");
 
     const required = [
       "startSession",
@@ -35,7 +35,7 @@ describe("security: no service-role key in frontend source", () => {
     // Read the raw source as text — this would catch accidental key inclusion
     // even if the module can't be imported in test env.
     const src = await fetch(
-      new URL("../lib/supabaseClient.js", import.meta.url)
+      new URL("../lib/supabaseClient.ts", import.meta.url)
     ).catch(() => null);
     if (!src) return; // fetch may not work in jsdom — skip gracefully
     const text = await src.text();
