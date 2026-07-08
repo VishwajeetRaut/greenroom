@@ -275,14 +275,25 @@ def next_question(track: str, role: str, history: list[dict], assigned_question:
         )
     if track == "technical" and assigned_question:
         is_stdio = bool(assigned_question.get("tests") and "stdin" in assigned_question["tests"][0])
-        io_note = (
-            "The candidate must write a complete program that reads input from stdin and "
-            "prints the answer to stdout — not just a function — since this problem is graded "
-            "by running their program against raw input/output, the same way Codeforces does."
-            if is_stdio else
-            f"The candidate should implement it as a function/class named "
-            f"`{assigned_question.get('function_name') or 'the appropriate signature'}`."
-        )
+        if is_stdio:
+            io_note = (
+                "The candidate must write a complete program that reads input from stdin and "
+                "prints the answer to stdout — not just a function — since this problem is graded "
+                "by running their program against raw input/output, the same way Codeforces does."
+            )
+        else:
+            from services.question_bank import parse_function_name
+            class_name, method_name = parse_function_name(assigned_question.get("function_name"))
+            if class_name:
+                io_note = (
+                    f"The candidate should implement it as a method named `{method_name}` inside "
+                    f"a class called `{class_name}`."
+                )
+            else:
+                io_note = (
+                    f"The candidate should implement it as a function named "
+                    f"`{method_name or 'the appropriate signature'}`."
+                )
         system_prompt += (
             f"\n\nThe coding problem assigned to this candidate is exactly this one — present it "
             f"(you may paraphrase the wording, but keep the requirements identical) once their "

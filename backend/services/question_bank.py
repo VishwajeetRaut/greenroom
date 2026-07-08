@@ -16,9 +16,34 @@ from __future__ import annotations
 import json
 import os
 import random
+import re
 import threading
 
 from services.supabase_client import get_supabase
+
+_CLASS_METHOD_PATTERN = re.compile(r"^(\w+)\(\)\.(\w+)$")
+
+
+def parse_function_name(raw: str | None) -> tuple[str | None, str]:
+    """Splits a question's function_name field into (class_name, method_name).
+
+    Most entries are plain functions, e.g. "two_sum" -> (None, "two_sum").
+    LeetCode-imported entries instead encode the calling convention as
+    "Solution().methodName" -> ("Solution", "methodName") — that exact string
+    is required verbatim by test_runner, which executes tests["call"] as-is
+    (e.g. "Solution().longestPalindromicSubsequence(s='a', k=2)"), so it is
+    NOT a data bug to fix — the class *is* part of how these are invoked.
+    Callers that need to talk about the signature (the interviewer's phrasing,
+    generated boilerplate) should use the parsed method_name instead of the
+    raw field, since "Solution().methodName" is not a valid identifier on its
+    own."""
+    if not raw:
+        return None, ""
+    m = _CLASS_METHOD_PATTERN.match(raw)
+    if m:
+        return m.group(1), m.group(2)
+    return None, raw
+
 
 _SEED_PATH = os.path.join(os.path.dirname(__file__), "..", "data", "question_bank.json")
 _lock = threading.Lock()

@@ -122,10 +122,13 @@ def _generate(language: str, question: dict) -> dict | None:
     system = _SYSTEM.format(
         language=lang_label, boilerplate_marker=b_marker, solution_marker=s_marker, harness_marker=h_marker,
     )
+    from services.question_bank import parse_function_name
+    _, method_name = parse_function_name(question.get("function_name"))
+
     tests_preview = "\n".join(f'  {t["call"]}  ->  {t["expected"]}' for t in question["tests"])
     user = (
         f"Problem: {question['title']}\n\n{question['prompt']}\n\n"
-        f"function_name: {question['function_name']}\n\nTest cases:\n{tests_preview}"
+        f"function_name: {method_name}\n\nTest cases:\n{tests_preview}"
     )
     try:
         from langchain_core.messages import HumanMessage, SystemMessage
