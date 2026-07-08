@@ -42,6 +42,15 @@ def check_session_limit(user_id: str) -> None:
         )
 
 
+MAX_CANDIDATE_TURNS = int(os.environ.get("MAX_CANDIDATE_TURNS", "15"))
+
+
+def is_turn_limit_reached(session: dict) -> bool:
+    """True when the candidate has sent MAX_CANDIDATE_TURNS messages in this session."""
+    turns = sum(1 for t in session["history"] if t["role"] == "candidate")
+    return turns >= MAX_CANDIDATE_TURNS
+
+
 def check_idle_timeout(session: dict) -> None:
     """Raises 410 if the session has been idle longer than SESSION_IDLE_TIMEOUT_MINUTES."""
     last_activity = session.get("last_activity_at")

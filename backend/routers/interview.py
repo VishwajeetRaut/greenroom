@@ -35,7 +35,7 @@ from services.persistence import (
     persist_session_start,
 )
 from services.rate_limit import check_rate_limit
-from services.session_guard import check_idle_timeout, check_ownership, check_session_limit
+from services.session_guard import check_idle_timeout, check_ownership, check_session_limit, is_turn_limit_reached
 from services.session_store import SESSIONS, evict, get_session, now, session_lock
 from services.supabase_client import get_supabase
 
@@ -92,6 +92,12 @@ async def post_message(req: MessageRequest, user: AuthenticatedUser = Depends(ge
         check_ownership(session, user)
         check_idle_timeout(session)
 
+        if is_turn_limit_reached(session):
+            return MessageResponse(
+                question="We've covered a lot of ground. Click 'End session' whenever you're ready for your scored evaluation.",
+                done=True,
+            )
+
         candidate_content = req.message
         if req.code:
             candidate_content += f"\n\n[Candidate's current code]\n{req.code}"
@@ -131,7 +137,7 @@ async def post_message(req: MessageRequest, user: AuthenticatedUser = Depends(ge
         session["last_activity_at"] = now()
 
     ctx = _question_context(session["assigned_question"]) if is_first_reply and session.get("assigned_question") else None
-    return MessageResponse(question=question, question_context=ctx)
+    return MessageResponse(question=question, question_context=ctx, done=is_turn_limit_reached(session))
 
 
 @router.post("/code/run", response_model=RunCodeJobResponse)
