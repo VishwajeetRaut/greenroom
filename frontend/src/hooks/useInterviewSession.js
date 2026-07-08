@@ -50,7 +50,7 @@ function isDiagramMeaningful(elements) {
  *
  * @param track         interview track ("behavioral" | "technical" | "system-design")
  * @param boardRef      ref to the SystemDesignBoard, used to read diagram elements
- * @param onQuestionContext  called with QuestionContext when the problem is first assigned
+ * @param onQuestionContext  called with (QuestionContext, sessionId) when the problem is first assigned
  */
 export function useInterviewSession({ track, boardRef, onQuestionContext }) {
   const navigate = useNavigate();
@@ -181,7 +181,7 @@ export function useInterviewSession({ track, boardRef, onQuestionContext }) {
       });
       setMessages((prev) => [...prev, { role: "interviewer", text: res.question }]);
       speakIfUnmuted(res.question);
-      if (res.question_context && onQuestionContext) onQuestionContext(res.question_context);
+      if (res.question_context && onQuestionContext) onQuestionContext(res.question_context, sessionId);
     } catch {
       setMessages((prev) => [
         ...prev,

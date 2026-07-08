@@ -186,6 +186,9 @@ async def get_boilerplate(session_id: str, language: str, user: AuthenticatedUse
         return BoilerplateResponse(boilerplate=None, supported=True)
 
     if bank_lang in (assigned.get("languages") or []):
+        if bank_lang in ("python", "node"):
+            signature = await harness_generator.get_or_generate_signature(assigned, bank_lang)
+            return BoilerplateResponse(boilerplate=signature, supported=True)
         return BoilerplateResponse(boilerplate=None, supported=True)
 
     if bank_lang not in ("java", "cpp"):

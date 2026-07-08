@@ -20,8 +20,10 @@ already supports, same as before this feature existed.
 
 from __future__ import annotations
 
+import ast
 import json
 import os
+import re
 
 import httpx
 
@@ -228,6 +230,127 @@ def _persist(question_id: str, language: str, harness_data: dict) -> None:
         existing = (row.data[0].get("harnesses") if row.data else None) or {}
         existing[language] = harness_data
         sb.table("questions").update({"harnesses": existing}).eq("id", question_id).execute()
+        question_bank.refresh()
+    except Exception:
+        pass
+
+
+# ── Python/JS function-signature boilerplate ─────────────────────────────────
+#
+# Unlike Java/C++, Python and JS problems already run through the test runner
+# by calling the candidate's function directly — there is no driver/harness to
+# generate. This is purely editor scaffolding: a question-specific signature
+# instead of the generic "write your solution here" starter. A wrong inferred
+# parameter name can't break test correctness (tests call positionally), so
+# this is verified with a syntax-only check rather than a sandbox run.
+
+_SIGNATURE_LANG_LABEL = {"python": "Python", "node": "JavaScript"}
+_SIGNATURE_PLACEHOLDER = {"python": "pass", "node": "// TODO: implement"}
+
+_SIGNATURE_SYSTEM = """\
+You write a starter function signature for a coding interview problem, for the candidate's \
+code editor. Reply with ONLY {language} source code — the function (or class, for \
+stateful/constructor-based problems) the candidate should implement, with a placeholder body \
+({placeholder}) and no logic. No markdown fences, no explanation, no imports the candidate \
+doesn't need.
+
+The problem statement usually shows the canonical call literally, e.g. `two_sum(nums, target)` \
+— if it does, you MUST reuse those exact parameter names verbatim, in the same order. Only \
+invent your own meaningful parameter names if the problem statement does not spell out a \
+signature. Do not name parameters after the literal test-call arguments below (those are only \
+there to show argument count/shape, not names). The function or method name MUST be exactly \
+`{function_name}`."""
+
+
+def _generate_signature(language: str, question: dict) -> str | None:
+    system = _SIGNATURE_SYSTEM.format(
+        language=_SIGNATURE_LANG_LABEL[language],
+        placeholder=_SIGNATURE_PLACEHOLDER[language],
+        function_name=question["function_name"],
+    )
+    tests_preview = "\n".join(f'  {t["call"]}  ->  {t["expected"]}' for t in question["tests"])
+    user = f"Problem: {question['title']}\n\n{question['prompt']}\n\nTest calls:\n{tests_preview}"
+
+    from langchain_core.messages import HumanMessage, SystemMessage
+
+    from services.llm import _fallback_chat, _make_llm
+
+    try:
+        llm = _make_llm(temperature=0.2, max_tokens=400)
+        raw = llm.invoke([SystemMessage(content=system), HumanMessage(content=user)]).content
+    except Exception:
+        try:
+            raw = _fallback_chat(
+                [{"role": "system", "content": system}, {"role": "user", "content": user}],
+                max_tokens=400, temperature=0.2,
+            )
+        except Exception:
+            return None
+
+    code = raw.strip().strip("`").strip()
+    first_line, _, rest = code.partition("\n")
+    if first_line.strip().lower() in ("python", "javascript", "js"):
+        code = rest.strip()
+
+    if not _verify_signature(language, code, question["function_name"]):
+        return None
+    return code
+
+
+def _verify_signature(language: str, code: str, function_name: str) -> bool:
+    if not code.strip():
+        return False
+    if language == "python":
+        try:
+            tree = ast.parse(code)
+        except SyntaxError:
+            return False
+        return any(
+            isinstance(node, ast.FunctionDef) and node.name == function_name
+            for node in ast.walk(tree)
+        )
+    if language == "node":
+        patterns = [
+            re.compile(rf"function\s+{re.escape(function_name)}\s*\("),
+            re.compile(rf"(?:const|let|var)\s+{re.escape(function_name)}\s*=\s*(?:function\b|\()"),
+            re.compile(rf"\b{re.escape(function_name)}\s*\([^)]*\)\s*\{{"),
+        ]
+        return any(p.search(code) for p in patterns)
+    return False
+
+
+async def get_or_generate_signature(question: dict, language: str) -> str | None:
+    """Returns a cached or freshly-generated function-signature boilerplate for
+    Python or JS ("node"). Returns None if generation/verification fails —
+    callers should fall back to the generic starter code, same as before this
+    feature existed."""
+    if language not in ("python", "node"):
+        return None
+
+    cached = (question.get("signatures") or {}).get(language)
+    if cached:
+        return cached
+
+    import asyncio
+    code = await asyncio.to_thread(_generate_signature, language, question)
+    if not code:
+        return None
+
+    await asyncio.to_thread(_persist_signature, question["id"], language, code)
+    return code
+
+
+def _persist_signature(question_id: str, language: str, code: str) -> None:
+    from services import question_bank
+    from services.supabase_client import get_supabase
+    sb = get_supabase()
+    if not sb:
+        return
+    try:
+        row = sb.table("questions").select("signatures").eq("id", question_id).execute()
+        existing = (row.data[0].get("signatures") if row.data else None) or {}
+        existing[language] = code
+        sb.table("questions").update({"signatures": existing}).eq("id", question_id).execute()
         question_bank.refresh()
     except Exception:
         pass
