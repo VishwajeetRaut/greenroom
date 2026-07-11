@@ -3,6 +3,8 @@ import { Link, useParams } from "react-router-dom";
 import Navbar from "../components/Navbar";
 import Footer from "../components/Footer";
 import { supabase } from "../lib/supabaseClient";
+import Losgann from "../components/Losgann";
+import SessionReplay from "../components/SessionReplay";
 
 export default function Results() {
   const { sessionId } = useParams();
@@ -10,6 +12,7 @@ export default function Results() {
   const [evaluations, setEvaluations] = useState([]);
   const [messages, setMessages] = useState([]);
   const [loading, setLoading] = useState(true);
+  const [losgannDismissed, setLosgannDismissed] = useState(false);
 
   useEffect(() => {
     let mounted = true;
@@ -107,19 +110,30 @@ export default function Results() {
                       ))}
                     </div>
                     {star.missing_elements?.length > 0 && (
-                      <div className="mt-4">
+                      <div className={`mt-4 transition-opacity duration-500 ${losgannDismissed ? "opacity-100" : "opacity-0 pointer-events-none"}`}>
                         <p className="text-xs font-medium uppercase tracking-wide text-coral">Missing / vague</p>
                         <ul className="mt-2 list-inside list-disc space-y-1 text-sm text-mute">
                           {star.missing_elements.map((m, i) => <li key={i}>{m}</li>)}
                         </ul>
                       </div>
                     )}
+                    <Losgann missingElements={star.missing_elements} onDismiss={() => setLosgannDismissed(true)} />
                   </div>
                 );
               })()}
 
+              <SessionReplay messages={messages} evaluations={evaluations} />
+
               <div className="mt-10">
-                <h2 className="font-display text-xl">Transcript</h2>
+  <div className="flex items-center justify-between">
+    <h2 className="font-display text-xl">Transcript</h2>
+    <button
+      onClick={() => window.print()}
+      className="flex items-center gap-2 rounded-full border border-white/10 px-4 py-2 text-xs text-mute transition hover:border-white/30 hover:text-cream"
+    >
+      🖨 Print transcript
+    </button>
+  </div>
                 <div className="mt-4 space-y-3">
                   {messages.map((m) => (
                     <div
