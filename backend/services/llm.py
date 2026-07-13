@@ -17,11 +17,11 @@ import re
 from typing import List
 
 import httpx
-from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
+from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
 from langchain_core.output_parsers import JsonOutputParser, StrOutputParser
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_groq import ChatGroq
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, SecretStr
 
 from services import guardrail
 from services.logger import log
@@ -63,7 +63,7 @@ def _make_llm(temperature: float = 0.7, max_tokens: int = 300) -> ChatGroq:
     if not GROQ_API_KEY:
         raise RuntimeError("GROQ_API_KEY is not set.")
     return ChatGroq(
-        api_key=GROQ_API_KEY,
+        api_key=SecretStr(GROQ_API_KEY),
         model=GROQ_MODEL,
         temperature=temperature,
         max_tokens=max_tokens,
@@ -195,8 +195,8 @@ Reply ONLY as valid JSON matching this exact schema — no markdown fences, no e
 
 # ── Helper: convert internal history to LangChain messages ───────────────────
 
-def _history_to_lc(history: list[dict]) -> list:
-    msgs = []
+def _history_to_lc(history: list[dict]) -> list[BaseMessage]:
+    msgs: list[BaseMessage] = []
     for turn in history:
         if turn["role"] == "interviewer":
             msgs.append(AIMessage(content=turn["content"]))
@@ -214,17 +214,17 @@ def opening_message(track: str, role: str) -> str:
     start = time.monotonic()
     try:
         llm_client = _make_llm(temperature=0.9, max_tokens=120)
-        result = llm_client.invoke([
+        response = llm_client.invoke([
             SystemMessage(content=system),
             HumanMessage(content="[The interview session is starting now.]"),
         ])
         log.info("llm.opening", track=track, latency_ms=round((time.monotonic() - start) * 1000), provider="groq")
-        return result.content.strip()
+        return str(response.content).strip()
     except Exception as exc:
         status = getattr(exc, "status_code", None)
         if status is None or status == 429 or (isinstance(status, int) and status >= 500):
             log.warning("llm.opening.fallback", track=track, error=str(exc))
-            result = _fallback_chat(
+            fallback_text = _fallback_chat(
                 [
                     {"role": "system", "content": system},
                     {"role": "user",   "content": "[The interview session is starting now.]"},
@@ -232,7 +232,7 @@ def opening_message(track: str, role: str) -> str:
                 max_tokens=120, temperature=0.9,
             )
             log.info("llm.opening", track=track, latency_ms=round((time.monotonic() - start) * 1000), provider="fallback")
-            return result
+            return fallback_text
         raise
 
 
@@ -326,7 +326,7 @@ def next_question(track: str, role: str, history: list[dict], assigned_question:
             if status is None or status == 429 or (isinstance(status, int) and status >= 500):
                 raw_msgs = [{"role": "system", "content": sys_prompt}]
                 for m in lc_history:
-                    raw_msgs.append({"role": "assistant" if isinstance(m, AIMessage) else "user", "content": m.content})
+                    raw_msgs.append({"role": "assistant" if isinstance(m, AIMessage) else "user", "content": str(m.content)})
                 raw_msgs.append({"role": "user", "content": last_turn})
                 return _fallback_chat(raw_msgs, max_tokens=200, temperature=temperature)
             raise

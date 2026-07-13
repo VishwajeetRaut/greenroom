@@ -69,7 +69,7 @@ def _extract(question: dict) -> dict | None:
     try:
         llm = _make_llm(temperature=0.1, max_tokens=800)
         result = llm.invoke([SystemMessage(content=_SYSTEM), HumanMessage(content=user)])
-        raw = _strip_fences(result.content)
+        raw = _strip_fences(str(result.content))
     except Exception:
         try:
             raw = _strip_fences(_fallback_chat(

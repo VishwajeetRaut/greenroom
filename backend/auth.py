@@ -29,7 +29,7 @@ def get_current_user(authorization: str | None = Header(default=None)) -> Authen
 
     try:
         response = supabase.auth.get_user(token)
-        user = response.user
+        user = response.user if response else None
     except Exception as exc:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,

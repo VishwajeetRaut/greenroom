@@ -63,7 +63,7 @@ def _generate_cases(problem: str) -> list[dict] | None:
     try:
         llm = _make_llm(temperature=0.1, max_tokens=600)
         result = llm.invoke([SystemMessage(content=_CASES_SYSTEM), HumanMessage(content=prompt)])
-        raw = _strip_fences(result.content)
+        raw = _strip_fences(str(result.content))
     except Exception as exc:
         status = getattr(exc, "status_code", None)
         if status is None or status == 429 or (isinstance(status, int) and status >= 500):
@@ -360,5 +360,5 @@ def parse_results(stdout: str, stderr: str) -> dict:
         "hidden_tests":  hidden_tests,
         "passed":        passed,
         "total":         total,
-        "error_type":    _classify_error(errors[0]) if errors else None,
+        "error_type":    _classify_error(str(errors[0])) if errors else None,
     }

@@ -33,6 +33,8 @@ async def with_retry(
     fn may be a coroutine function or a regular callable.
     Raises the last exception if all attempts fail.
     """
+    if attempts < 1:
+        raise ValueError("attempts must be >= 1")
     last_exc: Exception | None = None
     for attempt in range(1, attempts + 1):
         try:
@@ -54,4 +56,5 @@ async def with_retry(
                 await asyncio.sleep(delay)
             else:
                 log.error(f"{label}.failed", attempts=attempts, error=str(exc))
+    assert last_exc is not None  # guaranteed: attempts >= 1, loop only exits via return or this raise
     raise last_exc

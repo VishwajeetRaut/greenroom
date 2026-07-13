@@ -41,7 +41,7 @@ param minReplicas int = 0
 param maxReplicas int = 2
 
 resource backendApp 'Microsoft.App/containerApps@2023-05-01' = {
-  name: 'greenroom-backend'
+  name: 'greenroom-api'
   location: resourceGroup().location
   properties: {
     environmentId: environmentId

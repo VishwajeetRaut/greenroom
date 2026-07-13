@@ -88,7 +88,7 @@ async def run_code(language: str, version: str, source: str, stdin: str = "") ->
     start = time.monotonic()
 
     try:
-        result = await with_retry(
+        result: dict | None = await with_retry(
             lambda: _piston(language, version, source, stdin),
             attempts=2,
             base_delay=0.5,

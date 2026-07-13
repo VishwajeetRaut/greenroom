@@ -234,7 +234,7 @@ Piston's `isolate` backend requires `--privileged` Docker mode for full namespac
 | `pytest` unit tests | Guardrail logic, Pydantic model validation, rate limiter behaviour |
 | Architecture fitness functions | Frontend never imports `SERVICE_ROLE_KEY`; `supabaseClient` does not reference service-role credentials |
 | `Vitest` frontend tests | API module surface contracts; security boundary check |
-| CI gate | Lint (ruff), type-check, pytest, Vitest; Docker build blocked until all pass |
+| CI gate | Lint (ruff, eslint), type-check (mypy, tsc), pytest, Vitest — all blocking. `deploy-containers.yml` triggers off `ci.yml`'s completion and only proceeds if it succeeded. |
 
 Planned additions: `httpx.AsyncClient` integration tests covering endpoint ownership checks, rate limiter boundaries, and Pydantic validation edge cases; expanded Vitest coverage for hooks and components.
 
@@ -264,15 +264,22 @@ Piston     http://greenroom-piston.internal  (internal only, no public ingress)
 
 ### CI/CD Pipeline
 
-Every push to `main` that touches `backend/` or `piston/` triggers `.github/workflows/deploy-containers.yml`:
+`.github/workflows/ci.yml` runs on every push/PR to `main`, gated per-side by
+changed paths: lint (ruff / eslint), type-check (mypy, tsc), pytest, Vitest.
 
-1. CI gate: lint (ruff), type-check, pytest, Vitest
-2. Docker Buildx builds images targeting `linux/amd64`
+`.github/workflows/deploy-containers.yml` triggers via `workflow_run` once
+`ci.yml` *completes on `main`*, and gates on its `conclusion == 'success'` —
+a failing CI run no longer reaches production:
+
+1. Builds all three images (API, Piston, frontend) — `workflow_run` doesn't
+   carry per-push changed-paths info the way `push` events do, so unlike
+   `ci.yml` this isn't (yet) filtered to only the service(s) that changed;
+   Docker layer caching keeps an unaffected rebuild cheap
+2. Docker Buildx builds each image targeting `linux/amd64`
 3. Images pushed to GitHub Container Registry (`ghcr.io`) tagged with commit SHA and `latest`
 4. Azure authentication via OIDC federated identity; no credentials stored in GitHub
-5. Container Apps updated via `az containerapp update` pointing to the new image tag
-
-The frontend is deployed separately via its own workflow.
+5. `az containerapp update` applied to all three services, pointing each at its new image tag
+6. Post-deploy smoke test hits `/api/health` to confirm the new API revision is actually healthy
 
 ### Container Resources
 
@@ -280,6 +287,7 @@ The frontend is deployed separately via its own workflow.
 |---|---|---|---|---|
 | Backend API | 0.5 vCPU | 1.0 Gi | 0 | 2 |
 | Piston | 1.0 vCPU | 2.0 Gi | 0 | 1 |
+| Frontend | 0.25 vCPU | 0.5 Gi | 0 | 2 |
 
 ### Rollback
 

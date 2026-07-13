@@ -24,6 +24,7 @@ import ast
 import json
 import os
 import re
+from typing import cast
 
 import httpx
 
@@ -138,7 +139,7 @@ def _generate(language: str, question: dict) -> dict | None:
         from services.llm import _make_llm
         llm = _make_llm(temperature=0.2, max_tokens=3000)
         result = llm.invoke([SystemMessage(content=system), HumanMessage(content=user)])
-        raw = result.content
+        raw = str(result.content)
     except Exception:
         try:
             resp = httpx.post(
@@ -230,7 +231,10 @@ def _persist(question_id: str, language: str, harness_data: dict) -> None:
         return
     try:
         row = sb.table("questions").select("harnesses").eq("id", question_id).execute()
-        existing = (row.data[0].get("harnesses") if row.data else None) or {}
+        # Supabase's response typing is a generic recursive JSON alias; table
+        # rows are always dicts in practice.
+        row_data = cast(list[dict], row.data)
+        existing: dict = (row_data[0].get("harnesses") if row_data else None) or {}
         existing[language] = harness_data
         sb.table("questions").update({"harnesses": existing}).eq("id", question_id).execute()
         question_bank.refresh()
@@ -304,7 +308,7 @@ def _generate_signature(language: str, method_name: str, question: dict) -> str 
 
     try:
         llm = _make_llm(temperature=0.2, max_tokens=400)
-        raw = llm.invoke([SystemMessage(content=system), HumanMessage(content=user)]).content
+        raw = str(llm.invoke([SystemMessage(content=system), HumanMessage(content=user)]).content)
     except Exception:
         try:
             raw = _fallback_chat(
@@ -459,7 +463,10 @@ def _persist_signature(question_id: str, language: str, code: str) -> None:
         return
     try:
         row = sb.table("questions").select("signatures").eq("id", question_id).execute()
-        existing = (row.data[0].get("signatures") if row.data else None) or {}
+        # Supabase's response typing is a generic recursive JSON alias; table
+        # rows are always dicts in practice.
+        row_data = cast(list[dict], row.data)
+        existing: dict = (row_data[0].get("signatures") if row_data else None) or {}
         existing[language] = code
         sb.table("questions").update({"signatures": existing}).eq("id", question_id).execute()
         question_bank.refresh()

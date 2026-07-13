@@ -7,6 +7,7 @@ from auth import AuthenticatedUser, get_current_user
 from models import (
     BoilerplateResponse,
     CodeJobStatusResponse,
+    DiagramEvaluation,
     EndSessionRequest,
     EndSessionResponse,
     MessageRequest,
@@ -212,6 +213,7 @@ async def run_tests(req: RunTestsRequest, user: AuthenticatedUser = Depends(get_
     assigned = session.get("assigned_question")
     is_stdio = bool(assigned and assigned.get("tests") and "stdin" in assigned["tests"][0])
     if is_stdio:
+        assert assigned is not None  # is_stdio is only True when assigned is truthy
         parsed = await test_runner.run_stdio_tests(
             req.language, req.version, req.source,
             assigned["tests"], assigned.get("visible_count", 3),
@@ -286,13 +288,14 @@ async def end_session(req: EndSessionRequest, user: AuthenticatedUser = Depends(
 
         has_candidate_answer = any(t["role"] == "candidate" for t in session["history"])
         if not has_candidate_answer:
+            empty_summary = "No answers were recorded in this session. Start a new session and answer at least one question to receive a score."
             empty_result = {
                 "overall_score": 0,
-                "summary": "No answers were recorded in this session. Start a new session and answer at least one question to receive a score.",
+                "summary": empty_summary,
                 "evaluations": [],
             }
             await run_in_threadpool(persist_evaluation, req.session_id, empty_result)
-            return EndSessionResponse(overall_score=0, summary=empty_result["summary"], evaluations=[])
+            return EndSessionResponse(overall_score=0, summary=empty_summary, evaluations=[])
 
         result = await run_in_threadpool(llm.evaluate_session, session["track"], session["role"], session["history"])
 
@@ -310,5 +313,5 @@ async def end_session(req: EndSessionRequest, user: AuthenticatedUser = Depends(
         summary=result.get("summary", ""),
         star_analysis=result.get("star_analysis"),
         evaluations=result.get("evaluations", []),
-        diagram_evaluation=diagram_eval,
+        diagram_evaluation=DiagramEvaluation(**diagram_eval) if diagram_eval else None,
     )

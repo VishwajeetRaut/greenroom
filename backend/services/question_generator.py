@@ -120,7 +120,7 @@ def _ask_llm(system: str, user: str, temperature: float, max_tokens: int) -> str
     from services.llm import _make_llm
     llm = _make_llm(temperature=temperature, max_tokens=max_tokens)
     result = llm.invoke([SystemMessage(content=system), HumanMessage(content=user)])
-    return _strip_fences(result.content)
+    return _strip_fences(str(result.content))
 
 
 def _ask_llm_fallback(system: str, user: str, temperature: float, max_tokens: int) -> str:

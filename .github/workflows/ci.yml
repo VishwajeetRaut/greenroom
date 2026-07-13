@@ -6,9 +6,32 @@ on:
   pull_request:
     branches: [main]
 
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
+  changes:
+    name: Detect changed paths
+    runs-on: ubuntu-latest
+    outputs:
+      backend: ${{ steps.filter.outputs.backend }}
+      frontend: ${{ steps.filter.outputs.frontend }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            backend:
+              - 'backend/**'
+            frontend:
+              - 'frontend/**'
+
   backend-lint-test:
     name: Backend — lint & test
+    needs: changes
+    if: needs.changes.outputs.backend == 'true'
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -30,6 +53,9 @@ jobs:
       - name: Lint (ruff)
         run: ruff check .
 
+      - name: Type-check (mypy)
+        run: mypy .
+
       - name: Test (pytest)
         run: pytest tests/ -v --tb=short
         env:
@@ -39,6 +65,8 @@ jobs:
 
   frontend-lint-test:
     name: Frontend — lint & test
+    needs: changes
+    if: needs.changes.outputs.frontend == 'true'
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -59,6 +87,9 @@ jobs:
 
       - name: Lint (eslint)
         run: npm run lint
+
+      - name: Type-check (tsc)
+        run: npm run typecheck
 
       - name: Test (vitest)
         run: npm run test -- --run

@@ -11,6 +11,7 @@ import os
 from datetime import datetime, timezone
 
 from fastapi import HTTPException
+from postgrest.types import CountMethod
 
 from auth import AuthenticatedUser
 from services.supabase_client import get_supabase
@@ -30,7 +31,7 @@ def check_session_limit(user_id: str) -> None:
     sb = get_supabase()
     if not sb:
         return
-    resp = sb.table("sessions").select("id", count="exact").eq("user_id", user_id).eq("status", "active").execute()
+    resp = sb.table("sessions").select("id", count=CountMethod.exact).eq("user_id", user_id).eq("status", "active").execute()
     count = resp.count or 0
     if count >= MAX_ACTIVE_SESSIONS:
         raise HTTPException(

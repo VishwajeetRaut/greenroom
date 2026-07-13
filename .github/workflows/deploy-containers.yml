@@ -1,28 +1,58 @@
-name: Build Images
+name: Build and Deploy Containers
 
+# Gated on CI: this only runs after the "CI" workflow (ci.yml) completes on
+# main, and only proceeds if it succeeded — a failing lint/type-check/test
+# run can no longer reach production. Trade-off: workflow_run doesn't carry
+# the same "which paths changed in this push" info push events do, so unlike
+# ci.yml this always builds and deploys all three images rather than only
+# the changed one(s). Docker layer caching (cache-from: type=gha) keeps an
+# unaffected image's rebuild cheap, but it's not free — revisit if this
+# becomes a real cost/time problem.
 on:
-  push:
+  workflow_run:
+    workflows: ["CI"]
+    types: [completed]
     branches: [main]
-    paths:
-      - "backend/**"
-      - "piston/**"
-      - ".github/workflows/deploy-containers.yml"
   workflow_dispatch:
+
+concurrency:
+  group: deploy-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false # never cancel a deploy mid-flight
 
 env:
   REGISTRY: ghcr.io
   API_IMAGE: ghcr.io/${{ github.repository_owner }}/greenroom-api
   PISTON_IMAGE: ghcr.io/${{ github.repository_owner }}/greenroom-piston
+  FRONTEND_IMAGE: ghcr.io/${{ github.repository_owner }}/greenroom-frontend
+  # Container App names as actually created (see DEPLOYMENT.md Steps 1/3). If
+  # your resource group uses different names, override these as repo
+  # Settings -> Secrets and variables -> Actions -> Variables, or edit here.
+  API_APP_NAME: ${{ vars.AZURE_API_APP_NAME || 'greenroom-api' }}
+  PISTON_APP_NAME: ${{ vars.AZURE_PISTON_APP_NAME || 'greenroom-piston' }}
+  FRONTEND_APP_NAME: ${{ vars.AZURE_FRONTEND_APP_NAME || 'greenroom-frontend' }}
+  # The exact commit CI ran against, so every job builds/deploys that commit
+  # rather than whatever happens to be at the branch tip when this fires.
+  DEPLOY_SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
 
 jobs:
-  build-and-push:
+  gate:
+    name: Confirm CI succeeded
+    runs-on: ubuntu-latest
+    if: github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success'
+    steps:
+      - run: echo "CI succeeded (or manual dispatch) — proceeding to build/deploy."
+
+  build-api:
+    name: Build & push API image
+    needs: gate
     runs-on: ubuntu-latest
     permissions:
       contents: read
       packages: write
-
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.DEPLOY_SHA }}
 
       - name: Log in to GitHub Container Registry
         uses: docker/login-action@v3
@@ -34,8 +64,8 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Extract metadata for API image
-        id: meta-api
+      - name: Extract metadata
+        id: meta
         uses: docker/metadata-action@v5
         with:
           images: ${{ env.API_IMAGE }}
@@ -43,17 +73,39 @@ jobs:
             type=sha,prefix=sha-
             type=raw,value=latest
 
-      - name: Build and push API image
+      - name: Build and push
         uses: docker/build-push-action@v5
         with:
           context: backend
           push: true
-          tags: ${{ steps.meta-api.outputs.tags }}
+          tags: ${{ steps.meta.outputs.tags }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-      - name: Extract metadata for Piston image
-        id: meta-piston
+  build-piston:
+    name: Build & push Piston image
+    needs: gate
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.DEPLOY_SHA }}
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Extract metadata
+        id: meta
         uses: docker/metadata-action@v5
         with:
           images: ${{ env.PISTON_IMAGE }}
@@ -61,12 +113,106 @@ jobs:
             type=sha,prefix=sha-
             type=raw,value=latest
 
-      - name: Build and push Piston image
+      - name: Build and push
         uses: docker/build-push-action@v5
         with:
           context: piston
           platforms: linux/amd64
           push: true
-          tags: ${{ steps.meta-piston.outputs.tags }}
+          tags: ${{ steps.meta.outputs.tags }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+  build-frontend:
+    name: Build & push frontend image
+    needs: gate
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.DEPLOY_SHA }}
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.FRONTEND_IMAGE }}
+          tags: |
+            type=sha,prefix=sha-
+            type=raw,value=latest
+
+      - name: Build and push
+        uses: docker/build-push-action@v5
+        with:
+          context: frontend
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          build-args: |
+            VITE_SUPABASE_URL=${{ secrets.VITE_SUPABASE_URL }}
+            VITE_SUPABASE_ANON_KEY=${{ secrets.VITE_SUPABASE_ANON_KEY }}
+            VITE_API_URL=${{ secrets.VITE_API_URL }}
+
+  deploy:
+    name: Deploy to Azure Container Apps
+    needs: [build-api, build-piston, build-frontend]
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write # required for OIDC federated login
+      contents: read
+    steps:
+      - name: Azure login (OIDC)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Update API container app
+        run: |
+          az containerapp update \
+            --name "${{ env.API_APP_NAME }}" \
+            --resource-group "${{ secrets.AZURE_RESOURCE_GROUP }}" \
+            --image "${{ env.API_IMAGE }}:latest"
+
+      - name: Update Piston container app
+        run: |
+          az containerapp update \
+            --name "${{ env.PISTON_APP_NAME }}" \
+            --resource-group "${{ secrets.AZURE_RESOURCE_GROUP }}" \
+            --image "${{ env.PISTON_IMAGE }}:latest"
+
+      - name: Update frontend container app
+        run: |
+          az containerapp update \
+            --name "${{ env.FRONTEND_APP_NAME }}" \
+            --resource-group "${{ secrets.AZURE_RESOURCE_GROUP }}" \
+            --image "${{ env.FRONTEND_IMAGE }}:latest"
+
+  smoke-test:
+    name: Post-deploy smoke test
+    needs: deploy
+    runs-on: ubuntu-latest
+    steps:
+      - name: Hit /api/health
+        run: |
+          # Give the new revision a moment to come up before probing it.
+          sleep 20
+          curl -fsS "${{ secrets.VITE_API_URL }}/health" || {
+            echo "::error::Health check failed after deploy — new revision may not be healthy."
+            exit 1
+          }
