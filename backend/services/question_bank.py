@@ -18,6 +18,7 @@ import os
 import random
 import re
 import threading
+from typing import cast
 
 from services.supabase_client import get_supabase
 
@@ -60,7 +61,9 @@ def _load_from_supabase() -> list[dict] | None:
         return None
     try:
         resp = sb.table("questions").select("*").execute()
-        return resp.data or None
+        # Supabase's response typing is a generic recursive JSON alias; table
+        # rows are always dicts in practice.
+        return cast(list[dict], resp.data) or None
     except Exception:
         return None
 

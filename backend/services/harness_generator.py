@@ -24,6 +24,7 @@ import ast
 import json
 import os
 import re
+from typing import cast
 
 import httpx
 
@@ -230,7 +231,10 @@ def _persist(question_id: str, language: str, harness_data: dict) -> None:
         return
     try:
         row = sb.table("questions").select("harnesses").eq("id", question_id).execute()
-        existing = (row.data[0].get("harnesses") if row.data else None) or {}
+        # Supabase's response typing is a generic recursive JSON alias; table
+        # rows are always dicts in practice.
+        row_data = cast(list[dict], row.data)
+        existing: dict = (row_data[0].get("harnesses") if row_data else None) or {}
         existing[language] = harness_data
         sb.table("questions").update({"harnesses": existing}).eq("id", question_id).execute()
         question_bank.refresh()
@@ -459,7 +463,10 @@ def _persist_signature(question_id: str, language: str, code: str) -> None:
         return
     try:
         row = sb.table("questions").select("signatures").eq("id", question_id).execute()
-        existing = (row.data[0].get("signatures") if row.data else None) or {}
+        # Supabase's response typing is a generic recursive JSON alias; table
+        # rows are always dicts in practice.
+        row_data = cast(list[dict], row.data)
+        existing: dict = (row_data[0].get("signatures") if row_data else None) or {}
         existing[language] = code
         sb.table("questions").update({"signatures": existing}).eq("id", question_id).execute()
         question_bank.refresh()

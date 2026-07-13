@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import threading
 from datetime import datetime, timezone
+from typing import cast
 
 from services import question_bank
 from services.supabase_client import get_supabase
@@ -46,7 +47,9 @@ def get_session(session_id: str) -> dict | None:
     row_resp = sb.table("sessions").select("*").eq("id", session_id).limit(1).execute()
     if not row_resp.data:
         return None
-    row = row_resp.data[0]
+    # Supabase's response typing is a generic recursive JSON alias; table
+    # rows are always dicts in practice.
+    row = cast(dict, row_resp.data[0])
 
     msgs_resp = (
         sb.table("messages")
@@ -55,7 +58,8 @@ def get_session(session_id: str) -> dict | None:
         .order("sequence_no")
         .execute()
     )
-    history = [{"role": m["role"], "content": m["content"]} for m in (msgs_resp.data or [])]
+    messages = cast(list[dict], msgs_resp.data) or []
+    history = [{"role": m["role"], "content": m["content"]} for m in messages]
 
     assigned_question = None
     if row.get("assigned_question_id"):
@@ -63,8 +67,8 @@ def get_session(session_id: str) -> dict | None:
 
     # last_activity_at: most recent message timestamp, or session created_at
     last_activity = row.get("created_at")
-    if msgs_resp.data:
-        last_activity = msgs_resp.data[-1].get("created_at", last_activity)
+    if messages:
+        last_activity = messages[-1].get("created_at", last_activity)
 
     session = {
         "track": row["track"],
