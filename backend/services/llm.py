@@ -34,6 +34,8 @@ FALLBACK_BASE_URL = os.environ.get("FALLBACK_BASE_URL", "")
 FALLBACK_API_KEY  = os.environ.get("FALLBACK_API_KEY", "")
 FALLBACK_MODEL    = os.environ.get("FALLBACK_MODEL", "llama3.3:70b")
 
+EVAL_SELF_CRITIQUE_ENABLED = os.environ.get("EVAL_SELF_CRITIQUE_ENABLED", "true").lower() == "true"
+
 
 # ── Pydantic schemas for structured evaluation output ────────────────────────
 
@@ -175,6 +177,39 @@ Your job:
 3. Write a 2-3 sentence overall summary. End with the single most actionable improvement.
 
 Reply ONLY as valid JSON matching this exact schema — no markdown fences, no extra keys:
+{{
+  "overall_score": <int 0-10>,
+  "summary": "<string>",
+  "star_analysis": {{
+    "situation": "<string>",
+    "task": "<string>",
+    "action": "<string>",
+    "result": "<string>",
+    "star_score": <int 0-10>,
+    "missing_elements": ["<string>", ...]
+  }},
+  "evaluations": [
+    {{"category": "<string>", "score": <int 0-10>, "feedback": "<string>"}},
+    ...
+  ]
+}}"""
+
+
+CRITIQUE_SYSTEM_PROMPT = """\
+You are a senior interview coach reviewing a JUNIOR coach's evaluation of a mock {track} \
+interview for a {role} role, checking it against the transcript before it goes to the candidate.
+
+Look for:
+- Scores that don't match the written feedback (e.g. a 8/10 score paired with feedback describing \
+a weak answer, or vice versa).
+- Feedback that is generic filler rather than grounded in something the candidate actually said.
+- Missed evidence in the transcript that should have moved a score up or down.
+- STAR/solution-quality analysis that contradicts the transcript.
+
+If the draft evaluation is already accurate and well-grounded, return it UNCHANGED. Only edit scores \
+or text where you find a genuine mismatch — do not make cosmetic changes for their own sake.
+
+Reply ONLY as valid JSON matching this exact schema — no markdown fences, no extra keys, no commentary:
 {{
   "overall_score": <int 0-10>,
   "summary": "<string>",
@@ -347,6 +382,37 @@ def _reconcile_score(result: dict) -> None:
         result["overall_score"] = round(sum(scores) / len(scores))
 
 
+def _self_critique(track: str, role: str, transcript: str, draft: dict) -> dict:
+    """Second LLM pass: have a reviewer persona check the draft evaluation
+    against the transcript and correct any score/feedback mismatches.
+    Best-effort — any failure just returns the original draft unchanged."""
+    if not EVAL_SELF_CRITIQUE_ENABLED:
+        return draft
+    try:
+        system_content = CRITIQUE_SYSTEM_PROMPT.format(track=track, role=role)
+        human_content = (
+            f"Transcript:\n{transcript or 'The candidate did not answer any questions.'}\n\n"
+            f"Draft evaluation to review:\n{json.dumps(draft)}"
+        )
+        llm = _make_llm(temperature=0.2, max_tokens=700)
+        llm_json = llm.bind(response_format={"type": "json_object"})
+        parser = JsonOutputParser(pydantic_object=EvaluationResult)
+        chain = llm_json | parser
+        reviewed = chain.invoke([
+            SystemMessage(content=system_content),
+            HumanMessage(content=human_content),
+        ])
+        if hasattr(reviewed, "model_dump"):
+            reviewed = reviewed.model_dump()
+        _reconcile_score(reviewed)
+        log.info("llm.evaluate_session.self_critique", track=track,
+                  score_changed=reviewed.get("overall_score") != draft.get("overall_score"))
+        return reviewed
+    except Exception as exc:
+        log.warning("llm.evaluate_session.self_critique_failed", track=track, error=str(exc))
+        return draft
+
+
 def evaluate_session(track: str, role: str, history: list[dict]) -> dict:
     """
     LangChain LCEL evaluation chain:
@@ -380,7 +446,7 @@ def evaluate_session(track: str, role: str, history: list[dict]) -> dict:
         if hasattr(result, "model_dump"):
             result = result.model_dump()
         _reconcile_score(result)
-        return result
+        return _self_critique(track, role, transcript, result)
     except Exception as exc:
         status = getattr(exc, "status_code", None)
         if status is None or status == 429 or (isinstance(status, int) and status >= 500):
@@ -398,7 +464,7 @@ def evaluate_session(track: str, role: str, history: list[dict]) -> dict:
                 cleaned = re.sub(r"\n?```$", "", cleaned).strip()
                 result = json.loads(cleaned)
                 _reconcile_score(result)
-                return result
+                return _self_critique(track, role, transcript, result)
             except json.JSONDecodeError:
                 pass
         # Last-resort default
