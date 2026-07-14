@@ -31,5 +31,8 @@
     "tailwindcss": "^3.4.13",
     "vite": "^5.4.8",
     "vitest": "^2.0.0"
+  },
+  "overrides": {
+    "dompurify": "^3.4.11"
   }
 }

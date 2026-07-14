@@ -128,8 +128,20 @@ export const api = {
       `/interview/${sessionId}/boilerplate?language=${encodeURIComponent(language)}`
     ),
 
-  speak: (text: string): string =>
-    `${BASE_URL}/tts/speak?text=${encodeURIComponent(text)}`,
+  speak: async (text: string): Promise<string> => {
+    const { data } = await supabase.auth.getSession();
+    const token = data?.session?.access_token;
+    const headers: Record<string, string> = {};
+    if (token) headers["Authorization"] = `Bearer ${token}`;
+
+    const res = await fetch(`${BASE_URL}/tts/speak?text=${encodeURIComponent(text)}`, { headers });
+    if (!res.ok) {
+      const errText = await res.text();
+      throw new Error(`API error ${res.status}: ${errText}`);
+    }
+    const blob = await res.blob();
+    return URL.createObjectURL(blob);
+  },
 
   // Fire-and-forget usage/click tracking — never throws, so callers can
   // invoke it inline without try/catch.
