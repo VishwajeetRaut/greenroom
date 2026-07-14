@@ -210,54 +210,65 @@ async def run_tests(req: RunTestsRequest, user: AuthenticatedUser = Depends(get_
     check_ownership(session, user)
 
     assigned = session.get("assigned_question")
-    is_stdio = bool(assigned and assigned.get("tests") and "stdin" in assigned["tests"][0])
-    if is_stdio:
-        parsed = await test_runner.run_stdio_tests(
-            req.language, req.version, req.source,
-            assigned["tests"], assigned.get("visible_count", 3),
-        )
-        return RunTestsResponse(**parsed)
-
     bank_lang = "cpp" if req.language == "gcc" else req.language
-    if assigned and bank_lang in ("java", "cpp") and bank_lang not in (assigned.get("languages") or []):
-        harness_data = await harness_generator.get_or_generate(assigned, bank_lang)
-        if harness_data:
-            if bank_lang == "java":
-                full_source = harness_generator.merge_java_sources(req.source, harness_data["harness"])
-            else:
-                full_source = req.source + "\n\n" + harness_data["harness"]
-            result = await piston.run_code(req.language, req.version, full_source, stdin="")
-            raw = result.get("run", {})
-            parsed = test_runner.parse_results(raw.get("stdout", ""), raw.get("stderr", ""))
-            return RunTestsResponse(**parsed)
-        return RunTestsResponse(
-            status="compile_error",
-            compile_error=f"Couldn't auto-generate a verified {req.language} harness for this problem. Switch to Python or JavaScript, or try again — harness generation uses the LLM and occasionally fails on first attempt.",
-            error_type="transient",
-            visible_tests=[], hidden_tests=[], passed=0, total=0,
-        )
+    is_stdio = bool(assigned and assigned.get("tests") and "stdin" in assigned["tests"][0])
 
+    if is_stdio:
+        return RunTestsResponse(**await _run_stdio(req, assigned))
+    if assigned and bank_lang in ("java", "cpp") and bank_lang not in (assigned.get("languages") or []):
+        return RunTestsResponse(**await _run_generated_harness(req, assigned, bank_lang))
+    return RunTestsResponse(**await _run_call_expected(req, session, assigned))
+
+
+async def _run_stdio(req: RunTestsRequest, assigned: dict) -> dict:
+    return await test_runner.run_stdio_tests(
+        req.language, req.version, req.source,
+        assigned["tests"], assigned.get("visible_count", 3),
+    )
+
+
+async def _run_generated_harness(req: RunTestsRequest, assigned: dict, bank_lang: str) -> dict:
+    harness_data = await harness_generator.get_or_generate(assigned, bank_lang)
+    if not harness_data:
+        return _error_response(
+            f"Couldn't auto-generate a verified {req.language} harness for this problem. "
+            "Switch to Python or JavaScript, or try again — harness generation uses the LLM "
+            "and occasionally fails on first attempt.",
+            "transient",
+        )
+    if bank_lang == "java":
+        full_source = harness_generator.merge_java_sources(req.source, harness_data["harness"])
+    else:
+        full_source = req.source + "\n\n" + harness_data["harness"]
+    result = await piston.run_code(req.language, req.version, full_source, stdin="")
+    raw = result.get("run", {})
+    return test_runner.parse_results(raw.get("stdout", ""), raw.get("stderr", ""))
+
+
+async def _run_call_expected(req: RunTestsRequest, session: dict, assigned: dict | None) -> dict:
     harness = test_runner.generate_harness(
         req.language, req.source, session["history"],
         assigned_question=session.get("assigned_question"),
     )
     if harness is None:
-        lang = req.language
-        if lang not in ("python", "node"):
-            msg = f"Test cases are not yet supported for {lang}. Switch to Python or JavaScript to use the test runner."
-        else:
-            msg = "No coding problem has been assigned yet — wait for the interviewer to give you a problem first."
-        return RunTestsResponse(
-            status="compile_error",
-            compile_error=msg,
-            error_type="permanent",
-            visible_tests=[], hidden_tests=[], passed=0, total=0,
+        msg = (
+            f"Test cases are not yet supported for {req.language}. Switch to Python or JavaScript to use the test runner."
+            if req.language not in ("python", "node")
+            else "No coding problem has been assigned yet — wait for the interviewer to give you a problem first."
         )
-
+        return _error_response(msg, "permanent")
     result = await piston.run_code(req.language, req.version, harness)
     raw = result.get("run", {})
-    parsed = test_runner.parse_results(raw.get("stdout", ""), raw.get("stderr", ""))
-    return RunTestsResponse(**parsed)
+    return test_runner.parse_results(raw.get("stdout", ""), raw.get("stderr", ""))
+
+
+def _error_response(message: str, error_type: str) -> dict:
+    return {
+        "status": "compile_error",
+        "compile_error": message,
+        "error_type": error_type,
+        "visible_tests": [], "hidden_tests": [], "passed": 0, "total": 0,
+    }
 
 
 @router.delete("/{session_id}")
