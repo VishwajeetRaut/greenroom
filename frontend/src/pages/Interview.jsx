@@ -106,6 +106,18 @@ export default function Interview() {
                 </div>
               )}
 
+              {session.sendError && (
+                <div className="mb-3 flex items-start justify-between gap-2 rounded-lg border border-amber/30 bg-amber/5 px-3 py-2 text-xs text-amber-300/80">
+                  <span>{session.sendError}</span>
+                  <button
+                    onClick={() => session.setSendError(null)}
+                    className="shrink-0 text-white/40 hover:text-white/70"
+                  >
+                    ✕
+                  </button>
+                </div>
+              )}
+
               <div className="rounded-xl border border-white/10 bg-panelLight/40 p-4">
                 <div className="flex items-center justify-between">
                   <span className="text-xs uppercase tracking-wide text-mute">Your answer</span>

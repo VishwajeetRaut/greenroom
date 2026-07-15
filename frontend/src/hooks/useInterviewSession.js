@@ -62,6 +62,7 @@ export function useInterviewSession({ track, boardRef, onQuestionContext }) {
   const [ending, setEnding] = useState(false);
   const [answerText, setAnswerText] = useState("");
   const [diagramWarning, setDiagramWarning] = useState(null);
+  const [sendError, setSendError] = useState(null);
   const [sessionFull, setSessionFull] = useState(false);
 
   const transcriptEndRef = useRef(null);
@@ -173,6 +174,7 @@ export function useInterviewSession({ track, boardRef, onQuestionContext }) {
     setAnswerText("");
     reset();
     setSending(true);
+    setSendError(null);
 
     try {
       const res = await api.sendMessage({
@@ -186,10 +188,13 @@ export function useInterviewSession({ track, boardRef, onQuestionContext }) {
       if (res.question_context && onQuestionContext) onQuestionContext(res.question_context, sessionId);
       if (res.done) setSessionFull(true);
     } catch {
-      setMessages((prev) => [
-        ...prev,
-        { role: "interviewer", text: "Hmm, I lost connection there. Could you say that again?" },
-      ]);
+      // The backend rolls the turn back when it can't reply, so nothing was
+      // recorded. Drop the optimistic bubble to match that, and hand the
+      // answer back instead of making them retype it from memory — a
+      // reconstructed answer is what corrupted the transcript before.
+      setMessages((prev) => prev.slice(0, -1));
+      setAnswerText(answer);
+      setSendError("The interviewer didn't respond. Your answer is still here — send it again.");
     } finally {
       setSending(false);
     }
@@ -237,6 +242,8 @@ export function useInterviewSession({ track, boardRef, onQuestionContext }) {
     isMuted,
     diagramWarning,
     setDiagramWarning,
+    sendError,
+    setSendError,
     sessionFull,
     handleStartRecording,
     handleSend,
