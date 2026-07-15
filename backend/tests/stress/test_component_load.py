@@ -153,32 +153,101 @@ def test_self_critique_failure_preserves_draft(fake_llm, monkeypatch):
     assert out["overall_score"] == 7, "draft score was not preserved"
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "BUG: when the primary model fails and no fallback is configured, "
-        "_fallback_chat's RuntimeError escapes evaluate_session instead of "
-        "falling through to the last-resort default report. FALLBACK_BASE_URL "
-        "is optional, so any deployment without it turns a Groq 429 — the "
-        "signature failure under load — into a 500 at the end of an interview. "
-        "Remove this xfail when llm.py's fallback path is fixed."
-    ),
-)
+class _DeadModel:
+    """Stands in for ChatGroq when the provider is down — a 503 or a 429 burst.
+
+    Mimics enough of the Runnable surface for `llm.bind(...) | parser` to build,
+    then fails at invoke, which is where a real outage surfaces.
+    """
+
+    def bind(self, **kw):
+        return self
+
+    def __or__(self, other):
+        return self
+
+    def invoke(self, *a, **kw):
+        raise RuntimeError("Groq unavailable (503)")
+
+
 def test_evaluation_survives_dead_primary_without_fallback(monkeypatch):
-    """A dead primary with no fallback should still return the default report."""
-    class DeadModel:
-        def bind(self, **kw):
-            return self
+    """A dead primary with no fallback must still return the default report.
 
-        def __or__(self, other):
-            return self
-
-        def invoke(self, *a, **kw):
-            raise RuntimeError("Groq unavailable (503)")
-
-    monkeypatch.setattr(llm_mod, "_make_llm", lambda *a, **kw: DeadModel())
+    Regression test: _fallback_chat raises outright when FALLBACK_BASE_URL is
+    unset, and it used to be called outside the inner try, so that RuntimeError
+    escaped past the last-resort default and 500'd the end of an interview.
+    """
+    monkeypatch.setattr(llm_mod, "_make_llm", lambda *a, **kw: _DeadModel())
     monkeypatch.setattr(llm_mod, "FALLBACK_BASE_URL", "")
     monkeypatch.setattr(llm_mod, "FALLBACK_API_KEY", "")
+
+    out = llm_mod.evaluate_session(
+        "behavioral", "Software Engineer",
+        [{"role": "candidate", "content": "I led a migration."}],
+    )
+
+    assert out["overall_score"] == 5
+    assert "Could not generate" in out["summary"]
+
+
+def test_evaluation_uses_fallback_when_primary_dies(monkeypatch):
+    """A configured, working fallback must still produce a real report.
+
+    Guards the happy path through the same try block the fix restructured —
+    broadening the except must not swallow a fallback that actually worked.
+    """
+    monkeypatch.setattr(llm_mod, "_make_llm", lambda *a, **kw: _DeadModel())
+    monkeypatch.setattr(llm_mod, "FALLBACK_BASE_URL", "https://fallback.invalid/v1")
+    monkeypatch.setattr(llm_mod, "FALLBACK_API_KEY", "fallback-key")
+    monkeypatch.setattr(llm_mod, "_fallback_chat", lambda *a, **kw: EVAL_JSON)
+
+    out = llm_mod.evaluate_session(
+        "behavioral", "Software Engineer",
+        [{"role": "candidate", "content": "I led a migration."}],
+    )
+
+    assert "Could not generate" not in out["summary"], "a working fallback was discarded"
+    assert out["overall_score"] == 7
+
+
+def test_evaluation_survives_configured_fallback_timing_out(monkeypatch):
+    """A configured fallback that times out must still yield the default report.
+
+    This is the deployment-realistic shape of the bug: FALLBACK_BASE_URL *is*
+    set in prod, so the unconfigured case never fires there. But the fallback is
+    only ever reached when the primary is already failing, and a provider
+    outage or a load burst tends to hit both — so the fallback timing out is
+    correlated with, not independent of, the thing that summoned it.
+
+    Drives the real _fallback_chat with its network severed, since the raise
+    happens inside httpx, not in code we can stub around.
+    """
+    monkeypatch.setattr(llm_mod, "_make_llm", lambda *a, **kw: _DeadModel())
+    monkeypatch.setattr(llm_mod, "FALLBACK_BASE_URL", "https://fallback.invalid/v1")
+    monkeypatch.setattr(llm_mod, "FALLBACK_API_KEY", "fallback-key")
+
+    def timeout(*args, **kwargs):
+        raise httpx.TimeoutException("fallback timed out")
+
+    # Overrides the recording stub from assert_no_network, so this severed call
+    # is not counted as an escape.
+    monkeypatch.setattr(httpx, "post", timeout)
+
+    out = llm_mod.evaluate_session(
+        "behavioral", "Software Engineer",
+        [{"role": "candidate", "content": "I led a migration."}],
+    )
+
+    assert out["overall_score"] == 5
+    assert "Could not generate" in out["summary"]
+
+
+def test_evaluation_survives_fallback_returning_garbage(monkeypatch):
+    """An unparseable fallback response must degrade to the default report."""
+    monkeypatch.setattr(llm_mod, "_make_llm", lambda *a, **kw: _DeadModel())
+    monkeypatch.setattr(llm_mod, "FALLBACK_BASE_URL", "https://fallback.invalid/v1")
+    monkeypatch.setattr(llm_mod, "FALLBACK_API_KEY", "fallback-key")
+    monkeypatch.setattr(llm_mod, "_fallback_chat", lambda *a, **kw: "not json at all")
 
     out = llm_mod.evaluate_session(
         "behavioral", "Software Engineer",

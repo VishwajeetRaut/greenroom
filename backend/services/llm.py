@@ -450,14 +450,23 @@ def evaluate_session(track: str, role: str, history: list[dict]) -> dict:
     except Exception as exc:
         status = getattr(exc, "status_code", None)
         if status is None or status == 429 or (isinstance(status, int) and status >= 500):
-            raw = _fallback_chat(
-                [
-                    {"role": "system", "content": system_content},
-                    {"role": "user",   "content": transcript or "The candidate did not answer any questions."},
-                ],
-                max_tokens=700, temperature=0.3, json_mode=True,
-            )
+            # _fallback_chat must stay inside this try. It raises on an
+            # unconfigured fallback, a timeout, a 5xx via raise_for_status, or
+            # an unexpected response shape — and from outside the try any of
+            # those escape past the last-resort default below, turning a Groq
+            # failure into a 500 at the end of a candidate's session.
+            #
+            # This path only runs when the primary is already failing, and an
+            # outage or a load burst tends to hit both providers at once, so
+            # the fallback failing is correlated with the thing that summoned it.
             try:
+                raw = _fallback_chat(
+                    [
+                        {"role": "system", "content": system_content},
+                        {"role": "user",   "content": transcript or "The candidate did not answer any questions."},
+                    ],
+                    max_tokens=700, temperature=0.3, json_mode=True,
+                )
                 # Some fallback providers wrap JSON in markdown fences even
                 # with response_format=json_object set — strip before parsing.
                 cleaned = re.sub(r"^```[a-z]*\n?", "", raw.strip())
@@ -465,9 +474,13 @@ def evaluate_session(track: str, role: str, history: list[dict]) -> dict:
                 result = json.loads(cleaned)
                 _reconcile_score(result)
                 return _self_critique(track, role, transcript, result)
-            except json.JSONDecodeError:
-                pass
+            except Exception as fallback_exc:
+                log.warning(
+                    "llm.evaluate_session.fallback_failed",
+                    track=track, error=str(fallback_exc),
+                )
         # Last-resort default
+        log.warning("llm.evaluate_session.default_report", track=track, error=str(exc))
         return {
             "overall_score": 5,
             "summary": "Could not generate a detailed report this time. Your transcript has been saved.",
