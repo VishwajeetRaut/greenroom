@@ -150,6 +150,44 @@ Go to your repo → Settings → Secrets and variables → Actions → New repos
 
 ---
 
+## Step 4b — Apply database migrations
+
+`supabase/schema.sql` is the initial schema and is still run once, by hand, in
+the Supabase SQL editor. Everything in `supabase/migrations/` is applied by the
+runner instead:
+
+```bash
+cd backend
+pip install -r requirements-dev.txt
+
+# Supabase → Project Settings → Database → Connection string.
+# This is the Postgres connection string, NOT SUPABASE_URL — the app talks to
+# PostgREST, which cannot execute DDL.
+export DATABASE_URL='postgresql://postgres:PASSWORD@db.<ref>.supabase.co:5432/postgres'
+
+python scripts/migrate.py --status   # what is applied, what is pending
+python scripts/migrate.py            # apply everything pending
+```
+
+Each migration runs in a transaction together with its bookkeeping row, so it
+is applied exactly once and can never be left half-done. Re-running is a no-op.
+
+**First time only — a database that predates the runner.** The migrations up to
+`20260713_analytics_events` were applied by hand, so tell the runner they are
+already done rather than letting it apply them a second time:
+
+```bash
+python scripts/migrate.py --baseline 20260713_analytics_events
+```
+
+This records them without executing them. Run it once per environment, before
+the first real `migrate.py` run.
+
+**Migrations go before the code that needs them.** A deploy that ships code
+calling a function the database doesn't have yet will fail on every request.
+
+---
+
 ## Step 5 — Push and deploy
 
 ```bash
