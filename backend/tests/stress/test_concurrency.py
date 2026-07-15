@@ -157,74 +157,72 @@ def test_memory_limiter_enforces_limit_exactly_under_burst():
 # ── rate limiter (Postgres path — the deployed one) ──────────────────────────
 
 class _FakeTable:
-    """One Supabase table. Each execute() is individually atomic and pays a
-    round-trip cost, which is what a real client does."""
+    """The prune path. Deletes are fire-and-forget and not what's under test."""
 
     def __init__(self, store):
         self.store = store
-        self.op = None
-        self.filters = {}
-
-    def select(self, *a, **kw):
-        self.op = "select"
-        return self
-
-    def insert(self, row):
-        self.op = ("insert", row)
-        return self
 
     def delete(self):
-        self.op = "delete"
-        return self
-
-    def eq(self, k, v):
-        self.filters["eq"] = (k, v)
-        return self
-
-    def gte(self, k, v):
         return self
 
     def lt(self, k, v):
         return self
 
     def execute(self):
-        # Network latency. This is the gap between the count and the insert that
-        # a real deployment has; without it the race is invisible in-process.
         time.sleep(0.005)
-        with self.store.lock:
-            if self.op == "select":
-                key = self.filters["eq"][1]
-                rows = [r for r in self.store.rows if r["user_id"] == key]
-                return type("Resp", (), {"count": len(rows), "data": rows})()
-            if isinstance(self.op, tuple) and self.op[0] == "insert":
-                self.store.rows.append(self.op[1])
-                return type("Resp", (), {"count": None, "data": [self.op[1]]})()
-            return type("Resp", (), {"count": None, "data": []})()
+        return type("Resp", (), {"count": None, "data": []})()
 
 
 class _FakeSupabase:
+    """Models the check_rate_limit Postgres function.
+
+    The function body runs under pg_advisory_xact_lock on the user id, so its
+    count and insert are atomic with respect to other callers for the same user.
+    The lock here stands in for that. Latency is paid before the lock, like a
+    real network round-trip — the client waits, the server does not.
+
+    What this fake can and cannot prove: it cannot verify the SQL itself, which
+    needs a real Postgres. What it does verify is that the Python side depends
+    on a single atomic call — it exposes no way to count and insert separately,
+    so the old two-round-trip shape cannot even run against it, and
+    test_limiter_check_is_a_single_call pins the call count explicitly. The
+    advisory lock's correctness rests on review of the migration.
+    """
+
     def __init__(self):
         self.rows = []
         self.lock = threading.Lock()
+        self.rpc_calls = 0
+
+    def rpc(self, name, params):
+        assert name == "check_rate_limit", f"unexpected rpc: {name}"
+        store = self
+
+        class _Call:
+            def execute(self):
+                time.sleep(0.005)  # network round-trip, outside the lock
+                with store.lock:
+                    store.rpc_calls += 1
+                    key = params["p_user_id"]
+                    count = sum(1 for r in store.rows if r["user_id"] == key)
+                    if count >= params["p_max"]:
+                        return type("Resp", (), {"data": False})()
+                    store.rows.append({"user_id": key})
+                    return type("Resp", (), {"data": True})()
+
+        return _Call()
 
     def table(self, name):
         return _FakeTable(self)
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "BUG: _check_postgres counts rows, then inserts, without atomicity. "
-        "Concurrent requests all read a count below the limit before any of "
-        "them inserts, so every one is admitted — the limiter provides no "
-        "protection under exactly the burst it exists to stop. The limiter is "
-        "the cost control in front of the LLM calls. Needs a single atomic "
-        "operation (an INSERT ... RETURNING count, or a Postgres function). "
-        "Remove this xfail when rate_limit.py is fixed."
-    ),
-)
 def test_postgres_limiter_enforces_limit_under_burst():
-    """The deployed limiter must admit at most `limit` requests from a burst."""
+    """The deployed limiter must admit at most `limit` requests from a burst.
+
+    Regression test for the race that let a 20-request burst through a limit of
+    5. The limiter is the cost control in front of the LLM calls, so failing
+    open under burst is the expensive direction to fail.
+    """
     sb = _FakeSupabase()
     limit = 5
     n = 20
@@ -243,6 +241,20 @@ def test_postgres_limiter_enforces_limit_under_burst():
     _, errors = run_concurrent(attempt, n=n, workers=n)
 
     assert not errors, f"limiter raised unexpectedly: {errors[:1]}"
-    assert len(allowed) <= limit, (
-        f"rate limit of {limit} admitted {len(allowed)} concurrent requests"
+    assert len(allowed) == limit, (
+        f"rate limit of {limit} admitted {len(allowed)} of {n} concurrent requests"
     )
+    assert len(sb.rows) == limit, "rejected requests must not be recorded"
+
+
+def test_limiter_check_is_a_single_call():
+    """The count and the record must stay in one round-trip.
+
+    Pins the property that closed the race. If someone reintroduces a
+    client-side count-then-insert, the gap between the two calls is raceable
+    again no matter how each individual call is locked — so the call count is
+    the invariant worth guarding, not just the burst outcome above.
+    """
+    sb = _FakeSupabase()
+    _check_postgres(sb, "single-call-user", 10)
+    assert sb.rpc_calls == 1, f"expected exactly 1 atomic call, made {sb.rpc_calls}"

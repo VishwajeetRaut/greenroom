@@ -42,11 +42,11 @@ real `_llm_judge` and severs its network call instead.
 
 ## Known bugs pinned here
 
-Two tests are `xfail(strict=True)` against real bugs found while writing this
-suite. Strict means they fail if the bug is fixed and the marker is left behind,
-so the fix and the marker removal land together.
+Tests are `xfail(strict=True)` against real bugs found while writing this suite.
+Strict means they fail if the bug is fixed and the marker is left behind, so the
+fix and the marker removal land together.
 
-| Test | Bug |
-|---|---|
-| `test_postgres_limiter_enforces_limit_under_burst` | `_check_postgres` counts then inserts non-atomically, so a burst is admitted whole — no rate limiting under the exact condition it exists for. |
-| `test_evaluation_survives_dead_primary_without_fallback` | `_fallback_chat`'s `RuntimeError` escapes `evaluate_session` when no fallback is configured, so a Groq 429 becomes a 500 instead of the last-resort report. |
+| Test | Bug | Status |
+|---|---|---|
+| `test_postgres_limiter_enforces_limit_under_burst` | `_check_postgres` counted then inserted non-atomically, so a burst was admitted whole — no rate limiting under the exact condition it exists for. | fixed; now a regression test |
+| `test_evaluation_survives_dead_primary_without_fallback` | `_fallback_chat`'s `RuntimeError` escapes `evaluate_session` when no fallback is configured, so a Groq 429 becomes a 500 instead of the last-resort report. | still xfail |
