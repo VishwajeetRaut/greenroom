@@ -78,7 +78,7 @@ declared out of scope, and none are implemented in current code (checked):
 | Item | Status | Notes |
 |---|---|---|
 | Open more PRs, actively invite teammates to review | Ongoing | team habit, not a code task |
-| Improve CI/CD pipeline efficiency | Done | [PR #21](https://github.com/VishwajeetRaut/greenroom/pull/21) — path-filtered CI jobs, mypy/tsc gates, real `az containerapp update` deploy step (previously build-only), CI-gated deploy, post-deploy smoke test |
+| Improve CI/CD pipeline efficiency | In review | [PR #21](https://github.com/VishwajeetRaut/greenroom/pull/21) — path-filtered CI jobs, mypy/tsc gates, real `az containerapp update` deploy step (previously build-only), CI-gated deploy, post-deploy smoke test |
 | CI checks required before merge | Not started | `main` currently has **no branch protection at all** (`gh api repos/.../branches/main/protection` → 404) — CI runs but nothing blocks a merge if it fails. The v1.0 POC roadmap's "wire tests as required CI gate before deploy" item was never actually completed — it just stopped being mentioned once the test suites themselves (pytest/Vitest) were added in v4.0. Those two are different things. |
 
 ## Stress Testing
