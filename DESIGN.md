@@ -109,14 +109,15 @@ The rate limiter uses a `rate_limit_events` table in Supabase, with one row per 
 | Persistence across restart | Lost | Survives restarts |
 | Local dev without DB | Only mode | Auto-fallback |
 
-### Session concurrency cap and idle timeout
+### Session concurrency cap, idle timeout, and turn limit
 
-Two independent session-level guards in `session_guard.py`:
+Three independent session-level guards in `session_guard.py`:
 
 - **Concurrency cap:** `check_session_limit()` counts `sessions WHERE status='active' AND user_id=?`. Returns HTTP 429 if >= 3. Configurable via `MAX_ACTIVE_SESSIONS`.
 - **Idle timeout:** `check_idle_timeout()` compares `last_activity_at` against `now()`. Returns HTTP 410 if > 30 minutes idle. Configurable via `SESSION_IDLE_TIMEOUT_MINUTES`.
+- **Turn limit:** `is_turn_limit_reached()` counts candidate turns in the session history. Once `MAX_CANDIDATE_TURNS` (default 15) is reached, the interviewer wraps the session up instead of continuing to ask questions, so a session can't run indefinitely.
 
-Both run on every `/message` call after JWT validation, before the LLM call.
+All three run on every `/message` call after JWT validation, before the LLM call.
 
 ### Self-hosted Piston with Wandbox fallback
 
@@ -145,9 +146,11 @@ The test runner handles both problem formats present in the question bank:
   ```
 - **stdin/stdout** (Codeforces-style): The candidate's raw source is the program. Each test case provides `stdin`; stdout is compared against expected output. All languages Piston supports are valid with no whitelist.
 
-### Lazy harness generation for Java and C++
+### Lazy per-language boilerplate: Java/C++ harnesses and Python/JS signatures
 
 Java and C++ require a full compilable harness: imports, main, type-safe assertions. On first request the backend prompts the LLM to generate three sections (boilerplate, reference solution, test harness), runs the reference solution through the sandbox to verify all test cases pass, then caches the result under `questions.harnesses[language]` in Supabase. Subsequent requests for the same problem and language hit the cache immediately. If verification fails the harness is not cached, and the response is marked `error_type: "transient"` so the frontend suggests retrying.
+
+Python and JS don't need a harness — the test runner calls the candidate's function directly — but they still get a question-specific signature instead of a blank editor. For LeetCode-style `Solution().method` problems the parameter names are extracted deterministically from the bank's own test data (so a candidate can never see a keyword-argument name that doesn't match what the test runner will actually call); for plain functions and stateful/constructor-based problems the signature is LLM-generated and syntax-verified. Either way, the candidate's editor starts on the same boilerplate every time, and a reset button in `CodeEditor.jsx` restores it if they want to start over.
 
 ### Four-layer guardrail against answer leaks
 
@@ -176,6 +179,10 @@ The frontend holds only the Supabase **anon key** (safe to expose, used for PKCE
 
 When a system-design session ends, `llm.evaluate_diagram()` scores the candidate's Excalidraw canvas against the `expected_components` list on the assigned question. The LLM returns structured JSON: components found, components missing, proximity score (0-10), label, and one-sentence feedback. The Results page renders this as a dedicated Architecture Diagram card with a colour-coded component checklist.
 
+### Self-critique pass on the evaluation chain
+
+`evaluate_session()` runs a second LLM pass after the draft score and feedback are generated: a reviewer persona checks the draft against the transcript and corrects it where the score doesn't match the written feedback, the feedback reads as generic filler, or the transcript has evidence the first pass missed. If the draft already holds up, the reviewer is instructed to leave it unchanged rather than edit for its own sake. The pass is best-effort — any failure (bad JSON, LLM error) just falls back to the original draft, so it can never turn a working evaluation into a broken one, and it's controlled by `EVAL_SELF_CRITIQUE_ENABLED` so it can be switched off without a code change if it adds latency or cost that isn't worth it.
+
 ---
 
 ## 4. Scope
@@ -183,18 +190,18 @@ When a system-design session ends, `llm.evaluate_diagram()` scores the candidate
 ### Implemented
 
 - **Behavioral track:** multi-turn STAR-format Q&A with TTS voice; question assigned from the bank on first reply via `pick_behavioral_question()`
-- **Technical track:** Monaco editor, async code execution (Python, JS, Java, C++), dynamic test runner (call/expected + stdin/stdout), lazy Java/C++ harness generation, constraints panel, all languages supported for stdio problems
+- **Technical track:** Monaco editor, async code execution (Python, JS, Java, C++), dynamic test runner (call/expected + stdin/stdout), question-specific starter code for every language (LeetCode-style function/class signatures for Python/JS, lazy sandbox-verified harnesses for Java/C++) with a reset-to-original button, constraints panel, all languages supported for stdio problems
 - **System Design track:** Excalidraw canvas with real-time serialisation; diagram scoring at session end against `expected_components`
-- **Session management:** concurrency cap (max 3, HTTP 429), idle timeout (30 min, HTTP 410), session history and delete
+- **Session management:** concurrency cap (max 3, HTTP 429), idle timeout (30 min, HTTP 410), per-session candidate turn limit (15, then the interviewer wraps up), session history and delete
 - **Question bank:** 357 questions total:
   - 295 technical: LeetCodeDataset (Kaggle / newfacade, MIT) + CodeContests (DeepMind, CC-BY-4.0) + 8 hand-written; all constraints filled
   - 42 behavioral: `ashishps1/awesome-behavioral-interviews`; each with `expected_elements` (STAR components)
   - 20 system-design: `donnemartin/system-design-primer`; each with `expected_components` for diagram scoring
-- **LLM pipeline:** Groq (Llama 3.3 70B) primary with Ollama Cloud fallback; LangChain LCEL chains; four-layer guardrail
+- **LLM pipeline:** Groq (Llama 3.3 70B) primary with Ollama Cloud fallback; LangChain LCEL chains; four-layer guardrail; self-critique reviewer pass on the evaluation chain
 - **Code execution:** self-hosted Piston (internal) with Wandbox fallback; async job queue
 - **Auth:** Supabase email/password + PKCE OAuth; JWT validated server-side on every request; Postgres RLS
-- **Rate limiter:** Postgres sliding-window (30 req/min standard, 20 req/min code), in-memory fallback
-- **Observability:** structured JSON logging via `structlog`; GitHub Actions CI/CD (lint, type-check, pytest, Vitest)
+- **Rate limiter:** Postgres sliding-window (30 req/min standard, 20 req/min code), in-memory fallback; TTS gated behind the same auth + rate limit as every other endpoint
+- **Observability:** structured JSON logging via `structlog`; usage/click analytics (`analytics_events`); GitHub Actions CI/CD (lint, type-check, pytest, Vitest)
 
 ### Known infrastructure constraints
 
@@ -208,7 +215,7 @@ When a system-design session ends, `llm.evaluate_diagram()` scores the candidate
 
 **Controls in place:**
 
-- Every request validated server-side via `supabase.auth.get_user(token)`; JWT never decoded locally
+- Every request validated server-side via `supabase.auth.get_user(token)`; JWT never decoded locally — including the TTS endpoint, which now requires the same bearer token and rate limit as every other route
 - Session ownership checked in application code (`check_ownership`) and independently enforced by Postgres RLS policies
 - All inputs validated by Pydantic before any business logic runs: 100 KB max source code, 20 KB max message, 2,000 chars max TTS text, 50 chars max language/version strings
 - No SQL injection surface; all database queries use the Supabase SDK's parameterized methods
@@ -216,6 +223,7 @@ When a system-design session ends, `llm.evaluate_diagram()` scores the candidate
 - CORS locked to the deployed frontend origin via `ALLOWED_ORIGINS`
 - Piston has internal-only ingress, not reachable from the internet; only the backend container can call it
 - Four-layer guardrail prevents the LLM from leaking problem answers or optimal solutions
+- `dompurify` pinned via a package override to a patched version, closing a known XSS advisory in the transitive dependency chain
 - CI/CD uses OIDC federated identity; no Azure credentials stored as repository secrets
 - Architecture fitness function in CI checks: frontend never imports `SERVICE_ROLE_KEY`; every session endpoint calls `check_ownership`
 
@@ -304,6 +312,8 @@ FALLBACK_MODEL=llama3.3:70b            # Optional
 ALLOWED_ORIGINS=https://greenroom-frontend...azurecontainerapps.io
 MAX_ACTIVE_SESSIONS=3                  # Default: 3
 SESSION_IDLE_TIMEOUT_MINUTES=30        # Default: 30
+MAX_CANDIDATE_TURNS=15                 # Default: 15
+EVAL_SELF_CRITIQUE_ENABLED=true        # Default: true
 ```
 
 **Frontend:**
@@ -361,19 +371,20 @@ backend/
   models.py                  # Pydantic request/response schemas with field constraints
   routers/
     interview.py             # All interview endpoints: start, message, code/run, code/test, boilerplate, end, delete
-    tts.py                   # TTS endpoint
+    tts.py                   # TTS endpoint, auth-gated and rate-limited like every other route
+    analytics.py             # Fire-and-forget usage/click event ingestion
   services/
-    llm.py                   # LangChain LCEL chains: opening_message, next_question, evaluate_session, evaluate_diagram
+    llm.py                   # LangChain LCEL chains: opening_message, next_question, evaluate_session (+ self-critique pass), evaluate_diagram
     piston.py                # run_code(): Piston primary -> Wandbox fallback
     rate_limit.py            # Sliding-window per-user rate limiter: Postgres primary, in-memory fallback
     session_store.py         # In-memory SESSIONS dict with asyncio lock and idle eviction
-    session_guard.py         # check_ownership, check_session_limit (max 3), check_idle_timeout (30 min)
-    persistence.py           # Supabase writes: session start, messages, assigned_question, evaluation
+    session_guard.py         # check_ownership, check_session_limit (max 3), check_idle_timeout (30 min), is_turn_limit_reached (15 candidate turns)
+    persistence.py           # Supabase writes: session start, messages, assigned_question, evaluation, analytics events
     job_store.py             # Async code execution job queue with TTL eviction
     question_bank.py         # 357 questions: Supabase-first load with local JSON seed fallback
     question_generator.py    # LLM selects existing or generates new problem with dual-solution verification
     test_runner.py           # call/expected and stdin/stdout test modes, harness injection
-    harness_generator.py     # Lazy Java/C++ harness build via LLM, sandbox-verified, cached to Supabase
+    harness_generator.py     # Lazy Java/C++ harness + Python/JS signature generation via LLM, sandbox/syntax-verified, cached to Supabase
     guardrail.py             # 4-layer answer-leak prevention: prompt + regex + regeneration + fallback
     supabase_client.py       # Singleton Supabase client using service-role key
     logger.py                # structlog JSON logger
@@ -382,7 +393,7 @@ backend/
   data/
     question_bank.json       # 357 questions: 295 technical + 42 behavioral + 20 system-design (local seed)
   tests/
-    unit/                    # pytest: guardrail, models, rate_limit
+    unit/                    # pytest: guardrail, models, rate_limit, harness_generator, question_bank, llm self-critique, analytics
     architecture/            # Fitness functions: security boundaries, API surface contracts
 
 frontend/src/
@@ -393,21 +404,22 @@ frontend/src/
     AuthCallback.jsx         # Supabase PKCE OAuth redirect handler
     Dashboard.jsx            # Track selector, session history with score/status/delete, JD upload
     Interview.jsx            # Live interview: chat pane, Monaco editor, Excalidraw canvas, TTS
-    Results.jsx              # Scorecard: overall score, STAR breakdown, category scores, diagram card, transcript
+    Results.jsx              # Scorecard: overall score, STAR breakdown, category scores, diagram card, transcript, Losgann mascot, print button
   components/
-    CodeEditor.jsx           # Monaco editor with language selector, constraints panel, boilerplate fetch
+    CodeEditor.jsx           # Monaco editor with language selector, constraints panel, boilerplate fetch, reset-to-boilerplate button
     TestResultsPanel.jsx     # Visible tests (input/expected/got), hidden tests (pass/fail dots)
     SystemDesignBoard.jsx    # Excalidraw canvas with Live badge, tips bar, diagram serialisation
+    Losgann.jsx              # Results-page mascot that surfaces missing STAR elements
     AuthForm.jsx             # Shared login/signup form
     Navbar.jsx               # Top navigation
     Waveform.jsx             # Animated waveform for speech recognition indicator
   hooks/
-    useInterviewSession.js   # Session init/send/end lifecycle, diagram warning, 429/410 error handling
-    useCodeRunner.js         # Language state, starter code, boilerplate fetch, async test runner
+    useInterviewSession.js   # Session init/send/end lifecycle, diagram warning, turn-limit + 429/410 error handling, analytics events
+    useCodeRunner.js         # Language state, per-language boilerplate fetch + reset-to-original, async test runner
     useSpeechRecognition.js  # Web Speech API wrapper
-    useSpeechSynthesis.js    # TTS playback hook
+    useSpeechSynthesis.js    # TTS playback hook, attaches Bearer JWT to the audio request
   lib/
-    api.ts                   # Typed REST client: attaches Bearer JWT to every request
+    api.ts                   # Typed REST client: attaches Bearer JWT to every request, fire-and-forget analytics tracking
     supabaseClient.ts        # Supabase auth client using anon key, PKCE flow
 ```
 
@@ -469,6 +481,7 @@ questions (
   constraints          JSONB,
   examples             JSONB,
   harnesses            JSONB,          -- {java: {boilerplate, harness}, cpp: {...}}
+  signatures           JSONB,          -- {python: "def two_sum(...): ...", node: "..."}
   expected_elements    JSONB,          -- behavioral: STAR components to surface
   expected_components  JSONB,          -- system-design: architecture components for diagram scoring
   created_at           TIMESTAMPTZ DEFAULT now()
@@ -484,6 +497,17 @@ rate_limit_events (
 -- Index: idx_rate_limit_events_user_ts ON (user_id, ts)
 -- RLS: enabled
 -- Rows older than 5 minutes are pruned on each rate-limit check
+
+analytics_events (
+  id          BIGSERIAL PRIMARY KEY,
+  user_id     UUID NOT NULL,
+  session_id  UUID,
+  event       TEXT NOT NULL,
+  properties  JSONB NOT NULL DEFAULT '{}'::jsonb,
+  created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+)
+-- Indexes: idx_analytics_events_created_at, idx_analytics_events_user_id, idx_analytics_events_event
+-- RLS: enabled, no policy for anon/authenticated — service role only
 ```
 
 ---
@@ -495,7 +519,7 @@ rate_limit_events (
 | Method | Path | Rate limit | Description |
 |---|---|---|---|
 | `POST` | `/api/interview/start` | 30/min | Creates session, returns `{session_id, track, question}`. 429 if user has >= 3 active sessions. |
-| `POST` | `/api/interview/message` | 30/min | Sends candidate message. Assigns question on first reply. Returns `{question, question_context?}`. 410 if session idle > 30 min. |
+| `POST` | `/api/interview/message` | 30/min | Sends candidate message. Assigns question on first reply. Returns `{question, question_context?, done?}`. `done: true` once the candidate turn limit is reached. 410 if session idle > 30 min. |
 | `POST` | `/api/interview/code/run` | 20/min | Enqueues code execution. Returns `{job_id}` immediately. |
 | `GET` | `/api/interview/code/job/{id}` | - | Polls job status: `{status: pending\|done\|error, result?}` |
 | `POST` | `/api/interview/code/test` | 20/min | Runs test harness. Returns `{status, visible_tests[], hidden_tests[], passed, total, error_type?}` |
@@ -505,9 +529,15 @@ rate_limit_events (
 
 ### TTS: `/api/tts`
 
+| Method | Path | Rate limit | Description |
+|---|---|---|---|
+| `GET` | `/api/tts/speak?text=` | 30/min | Returns `audio/mpeg` stream via Microsoft Edge neural TTS. Text: 1-2,000 characters. |
+
+### Analytics: `/api/analytics`
+
 | Method | Path | Description |
 |---|---|---|
-| `GET` | `/api/tts/speak?text=` | Returns `audio/mpeg` stream via Microsoft Edge neural TTS. Text: 1-2,000 characters. |
+| `POST` | `/api/analytics/event` | Fire-and-forget usage/click event. Persists in the background via `BackgroundTasks`; always returns 202 immediately regardless of whether the write succeeds. |
 
 ### Health
 
