@@ -48,7 +48,7 @@ function CustomDot(props) {
   );
 }
 
-export default function SessionReplay({ messages, evaluations }) {
+export default function SessionReplay({ messages = [], evaluations = [] }) {
   const [selectedPoint, setSelectedPoint] = useState(null);
 
   const candidateMessages = messages.filter((m) => m.role === "candidate");
