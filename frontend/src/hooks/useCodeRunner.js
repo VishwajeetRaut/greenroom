@@ -72,21 +72,11 @@ export function useCodeRunner() {
     await fetchBoilerplate(newLanguage, sessionId);
   };
 
-  // Called whenever the interviewer assigns a (new) technical question.
-  // Resets all per-question state so stale boilerplate / test results from
-  // the previous question don't bleed through, then fetches fresh boilerplate
-  // for the currently selected language.  Other languages get their boilerplate
-  // lazily via handleLanguageChange → fetchBoilerplate when the user switches.
+  // Called once the interviewer assigns a technical question — fetches
+  // boilerplate for whatever language is currently selected (usually the
+  // default, Python, which never goes through handleLanguageChange).
   const handleQuestionAssigned = (ctx, sessionId) => {
     setQuestionContext(ctx);
-    setTestResults(null);
-    setRevealedCount(0);
-    setBoilerplateNote(null);
-    // Wipe cached originals for every language so a language-switch always
-    // goes back to the backend for the new question's boilerplate.
-    originalCodeRef.current = Object.fromEntries(
-      Object.keys(STARTER_CODE).map((k) => [k, STARTER_CODE[k]])
-    );
     fetchBoilerplate(language, sessionId);
   };
 
