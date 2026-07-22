@@ -108,41 +108,72 @@ async def post_message(req: MessageRequest, user: AuthenticatedUser = Depends(ge
         if req.code:
             candidate_content += f"\n\n[Candidate's current code]\n{req.code}"
 
-        is_first_reply = (
+        needs_question = (
             session["track"] in ("technical", "system-design", "behavioral")
             and session.get("assigned_question") is None
         )
+
+        # The candidate's turn goes into the in-memory history first because
+        # llm.next_question reads it as the current input — but it is NOT
+        # persisted until the interviewer's reply exists. A turn recorded
+        # without a reply is a turn the candidate will be invited to repeat
+        # (the UI says "could you say that again?"), and the retry would then
+        # append it a second time. Two candidate turns in a row is a transcript
+        # llm.evaluate_session later grades.
         session["history"].append({"role": "candidate", "content": candidate_content})
+        try:
+            if needs_question:
+                if session["track"] == "technical":
+                    session["assigned_question"] = await question_generator.select_or_generate_question(
+                        session["role"], candidate_intro=req.message,
+                    )
+                elif session["track"] == "system-design":
+                    session["assigned_question"] = await run_in_threadpool(
+                        question_bank.pick_system_design_question
+                    )
+                else:
+                    session["assigned_question"] = await run_in_threadpool(
+                        question_bank.pick_behavioral_question
+                    )
+                # Persisted before the reply on purpose: it only records which
+                # problem was picked, and keeping it means a retry reuses that
+                # question instead of paying to generate a different one.
+                if session["assigned_question"]:
+                    await run_in_threadpool(persist_assigned_question, req.session_id, session["assigned_question"]["id"])
+
+            question = await run_in_threadpool(
+                llm.next_question, session["track"], session["role"], session["history"],
+                session.get("assigned_question"), session.get("job_description"),
+            )
+        except HTTPException:
+            session["history"].pop()
+            raise
+        except Exception as exc:
+            # Roll the turn back so a retry starts from the state we began in.
+            session["history"].pop()
+            raise HTTPException(
+                status_code=503,
+                detail="The interviewer is temporarily unavailable. Your answer was not recorded — please send it again.",
+            ) from exc
+
+        # Both turns exist. Persist them together, in order.
         await run_in_threadpool(persist_message, req.session_id, "candidate", req.message, session["next_sequence_no"])
         session["next_sequence_no"] += 1
-
-        if is_first_reply:
-            if session["track"] == "technical":
-                session["assigned_question"] = await question_generator.select_or_generate_question(
-                    session["role"], candidate_intro=req.message,
-                )
-            elif session["track"] == "system-design":
-                session["assigned_question"] = await run_in_threadpool(
-                    question_bank.pick_system_design_question
-                )
-            else:
-                session["assigned_question"] = await run_in_threadpool(
-                    question_bank.pick_behavioral_question
-                )
-            if session["assigned_question"]:
-                await run_in_threadpool(persist_assigned_question, req.session_id, session["assigned_question"]["id"])
-
-        question = await run_in_threadpool(
-            llm.next_question, session["track"], session["role"], session["history"],
-            session.get("assigned_question"), session.get("job_description"),
-        )
-
         session["history"].append({"role": "interviewer", "content": question})
         await run_in_threadpool(persist_message, req.session_id, "interviewer", question, session["next_sequence_no"])
         session["next_sequence_no"] += 1
         session["last_activity_at"] = now()
 
-    ctx = _question_context(session["assigned_question"]) if is_first_reply and session.get("assigned_question") else None
+        # Delivered once, tracked explicitly rather than inferred from
+        # "assigned_question is None". That inference conflated "first reply"
+        # with "question already picked", so a failed attempt that had already
+        # picked the question left every later reply looking like a non-first
+        # one — and the constraints panel never reached the candidate.
+        ctx = None
+        if session.get("assigned_question") and not session.get("question_context_sent"):
+            ctx = _question_context(session["assigned_question"])
+            session["question_context_sent"] = True
+
     return MessageResponse(question=question, question_context=ctx, done=is_turn_limit_reached(session))
 
 
