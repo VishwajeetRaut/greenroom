@@ -53,6 +53,7 @@ def _question_context(assigned: dict) -> QuestionContext:
         id=assigned["id"],
         title=assigned.get("title", ""),
         difficulty=assigned.get("difficulty", ""),
+        prompt=assigned.get("prompt", ""),
         constraints=assigned.get("constraints") or [],
         examples=assigned.get("examples") or [],
         is_stdio=is_stdio,

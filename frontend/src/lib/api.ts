@@ -35,6 +35,7 @@ export interface QuestionContext {
   id: string;
   title: string;
   difficulty: string;
+  prompt: string;
   constraints: string[];
   examples: Record<string, unknown>[];
   is_stdio: boolean;

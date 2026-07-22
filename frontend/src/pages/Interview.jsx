@@ -153,7 +153,9 @@ export default function Interview() {
           </section>
 
           {/* ── Side column ── */}
-          <section className="rounded-2xl border border-white/10 bg-panel">
+          <section className={`rounded-2xl border border-white/10 bg-panel${track === "technical" ? " overflow-hidden" : ""}`}
+            style={track === "technical" ? { height: "82vh" } : undefined}
+          >
             {track === "technical" ? (
               <CodeEditor
                 language={codeRunner.language}

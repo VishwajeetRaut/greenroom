@@ -60,6 +60,7 @@ class QuestionContext(BaseModel):
     id: str
     title: str
     difficulty: str
+    prompt: str
     constraints: List[str]
     examples: List[dict]
     is_stdio: bool
