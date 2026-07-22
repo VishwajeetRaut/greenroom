@@ -66,6 +66,7 @@ export function useInterviewSession({ track, boardRef, onQuestionContext }) {
 
   const transcriptEndRef = useRef(null);
   const initDoneRef = useRef(false);
+  const newMessageWhileMutedRef = useRef(false);
 
   const { isSupported, isListening, transcript, interimTranscript, start, stop, reset } =
     useSpeechRecognition();
@@ -78,8 +79,14 @@ export function useInterviewSession({ track, boardRef, onQuestionContext }) {
 
   const speakIfUnmuted = useCallback((text) => {
     lastInterviewerTextRef.current = text;
-    if (!isMutedRef.current) speak(text);
-  }, [speak]);
+    if (isMutedRef.current) {
+      stopSpeech(); // discard old paused audio — new content supersedes it
+      newMessageWhileMutedRef.current = true;
+    } else {
+      newMessageWhileMutedRef.current = false;
+      speak(text);
+    }
+  }, [speak, stopSpeech]);
 
   useEffect(() => {
     if (isListening) setAnswerText(`${transcript} ${interimTranscript}`.trim());
@@ -218,8 +225,18 @@ export function useInterviewSession({ track, boardRef, onQuestionContext }) {
     const nowMuted = !isMuted;
     isMutedRef.current = nowMuted;
     setIsMuted(nowMuted);
-    if (nowMuted) pauseSpeech();
-    else resumeSpeech();
+    if (nowMuted) {
+      pauseSpeech();
+    } else {
+      if (newMessageWhileMutedRef.current && lastInterviewerTextRef.current) {
+        // new response arrived while muted — speak it fresh
+        newMessageWhileMutedRef.current = false;
+        speak(lastInterviewerTextRef.current);
+      } else {
+        // no new message — resume from where we paused
+        resumeSpeech();
+      }
+    }
   };
 
   return {
