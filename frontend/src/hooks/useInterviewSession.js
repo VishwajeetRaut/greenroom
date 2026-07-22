@@ -69,7 +69,7 @@ export function useInterviewSession({ track, boardRef, onQuestionContext }) {
 
   const { isSupported, isListening, transcript, interimTranscript, start, stop, reset } =
     useSpeechRecognition();
-  const { isSpeaking, speak, stop: stopSpeech } = useSpeechSynthesis();
+  const { isSpeaking, speak, stop: stopSpeech, pause: pauseSpeech, resume: resumeSpeech } = useSpeechSynthesis();
   const [isMuted, setIsMuted] = useState(false);
   const isMutedRef = useRef(false);
   const lastInterviewerTextRef = useRef(null);
@@ -218,8 +218,8 @@ export function useInterviewSession({ track, boardRef, onQuestionContext }) {
     const nowMuted = !isMuted;
     isMutedRef.current = nowMuted;
     setIsMuted(nowMuted);
-    if (nowMuted) stopSpeech();
-    else if (lastInterviewerTextRef.current) speak(lastInterviewerTextRef.current);
+    if (nowMuted) pauseSpeech();
+    else resumeSpeech();
   };
 
   return {
