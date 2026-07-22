@@ -45,6 +45,9 @@ export default function Dashboard() {
   const [loading, setLoading] = useState(true);
   const [userEmail, setUserEmail] = useState("");
   const [deletingId, setDeletingId] = useState(null);
+  const [selectionMode, setSelectionMode] = useState(false);
+  const [selectedIds, setSelectedIds] = useState(new Set());
+  const [deletingBulk, setDeletingBulk] = useState(false);
 
   useEffect(() => {
     let mounted = true;
@@ -86,6 +89,39 @@ export default function Dashboard() {
       alert("Failed to delete session. Please try again.");
     } finally {
       setDeletingId(null);
+    }
+  };
+
+  const toggleSelection = (id) => {
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      next.has(id) ? next.delete(id) : next.add(id);
+      return next;
+    });
+  };
+
+  const toggleSelectAll = () => {
+    if (selectedIds.size === sessions.length) setSelectedIds(new Set());
+    else setSelectedIds(new Set(sessions.map((s) => s.id)));
+  };
+
+  const exitSelectionMode = () => {
+    setSelectionMode(false);
+    setSelectedIds(new Set());
+  };
+
+  const handleDeleteSelected = async () => {
+    if (selectedIds.size === 0) return;
+    if (!window.confirm(`Delete ${selectedIds.size} session${selectedIds.size > 1 ? "s" : ""}? This cannot be undone.`)) return;
+    setDeletingBulk(true);
+    try {
+      await Promise.all([...selectedIds].map((id) => api.deleteSession(id)));
+      setSessions((prev) => prev.filter((s) => !selectedIds.has(s.id)));
+      exitSelectionMode();
+    } catch {
+      alert("Some sessions could not be deleted. Please try again.");
+    } finally {
+      setDeletingBulk(false);
     }
   };
 
@@ -161,7 +197,43 @@ export default function Dashboard() {
           )}
 
           <div className="mt-16">
-            <h2 className="font-display text-2xl tracking-tight">Recent sessions</h2>
+            <div className="flex items-center justify-between">
+              <h2 className="font-display text-2xl tracking-tight">Recent sessions</h2>
+              {!loading && sessions.length > 0 && (
+                <div className="flex items-center gap-3">
+                  {selectionMode ? (
+                    <>
+                      <button
+                        onClick={toggleSelectAll}
+                        className="text-sm text-mute transition hover:text-cream"
+                      >
+                        {selectedIds.size === sessions.length ? "Deselect all" : "Select all"}
+                      </button>
+                      <button
+                        onClick={handleDeleteSelected}
+                        disabled={selectedIds.size === 0 || deletingBulk}
+                        className="rounded-full bg-coral/10 px-4 py-1.5 text-sm text-coral transition hover:bg-coral/20 disabled:opacity-40"
+                      >
+                        {deletingBulk ? "Deleting..." : `Delete selected${selectedIds.size > 0 ? ` (${selectedIds.size})` : ""}`}
+                      </button>
+                      <button
+                        onClick={exitSelectionMode}
+                        className="text-sm text-mute transition hover:text-cream"
+                      >
+                        Cancel
+                      </button>
+                    </>
+                  ) : (
+                    <button
+                      onClick={() => setSelectionMode(true)}
+                      className="rounded-full border border-white/10 px-4 py-1.5 text-sm text-mute transition hover:border-coral/40 hover:text-coral"
+                    >
+                      Select sessions
+                    </button>
+                  )}
+                </div>
+              )}
+            </div>
 
             {loading ? (
               <p className="mt-4 text-sm text-mute">Loading...</p>
@@ -174,6 +246,7 @@ export default function Dashboard() {
                 <table className="w-full text-left text-sm">
                   <thead className="bg-panel text-mute">
                     <tr>
+                      {selectionMode && <th className="px-4 py-3 w-8"></th>}
                       <th className="px-4 py-3 font-medium">Track</th>
                       <th className="px-4 py-3 font-medium">Role</th>
                       <th className="px-4 py-3 font-medium">Score</th>
@@ -184,7 +257,20 @@ export default function Dashboard() {
                   </thead>
                   <tbody>
                     {sessions.map((s) => (
-                      <tr key={s.id} className="border-t border-white/5">
+                      <tr
+                        key={s.id}
+                        className={`border-t border-white/5 transition ${selectionMode && selectedIds.has(s.id) ? "bg-coral/5" : ""}`}
+                      >
+                        {selectionMode && (
+                          <td className="px-4 py-3">
+                            <input
+                              type="checkbox"
+                              checked={selectedIds.has(s.id)}
+                              onChange={() => toggleSelection(s.id)}
+                              className="h-4 w-4 cursor-pointer accent-coral"
+                            />
+                          </td>
+                        )}
                         <td className="px-4 py-3 capitalize">{s.track}</td>
                         <td className="px-4 py-3 text-mute">{s.role || "—"}</td>
                         <td className="px-4 py-3">
@@ -202,7 +288,7 @@ export default function Dashboard() {
                         <td className="px-4 py-3 text-right">
                           <button
                             onClick={() => handleDelete(s.id)}
-                            disabled={deletingId === s.id}
+                            disabled={deletingId === s.id || deletingBulk}
                             className="text-sm text-mute transition hover:text-coral disabled:opacity-50"
                           >
                             {deletingId === s.id ? "Deleting..." : "Delete"}
