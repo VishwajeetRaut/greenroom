@@ -1,6 +1,22 @@
-from typing import List, Literal, Optional
+import uuid
+from typing import Annotated, List, Literal, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import AfterValidator, BaseModel, Field
+
+
+def _validate_session_id(v: str) -> str:
+    try:
+        uuid.UUID(v)
+    except (ValueError, AttributeError, TypeError) as exc:
+        raise ValueError("session_id must be a valid UUID") from exc
+    return v
+
+
+# Session ids are always generated server-side via uuid.uuid4() (see
+# routers/interview.py::start_session), so any request carrying one that
+# isn't a well-formed UUID is either a bug in the caller or a probe — reject
+# it at the request-validation boundary instead of letting it reach Supabase.
+SessionId = Annotated[str, AfterValidator(_validate_session_id)]
 
 
 class StartSessionRequest(BaseModel):
@@ -26,7 +42,7 @@ class HiddenTestResult(BaseModel):
 
 
 class RunTestsRequest(BaseModel):
-    session_id: str
+    session_id: SessionId
     language: str = Field(min_length=1, max_length=50)
     version: str = Field(min_length=1, max_length=50)
     source: str = Field(min_length=1, max_length=100_000)
@@ -49,7 +65,7 @@ class StartSessionResponse(BaseModel):
 
 
 class MessageRequest(BaseModel):
-    session_id: str
+    session_id: SessionId
     message: str = Field(min_length=1, max_length=20_000)
     code: Optional[str] = Field(default=None, max_length=100_000)
     language: Optional[str] = Field(default=None, max_length=50)
@@ -91,12 +107,12 @@ class ResumeSessionResponse(BaseModel):
 
 
 class SaveDiagramRequest(BaseModel):
-    session_id: str
+    session_id: SessionId
     elements: List[dict] = Field(default_factory=list, max_length=5000)
 
 
 class EndSessionRequest(BaseModel):
-    session_id: str
+    session_id: SessionId
 
 
 class EvaluationCategory(BaseModel):
@@ -132,5 +148,5 @@ class EndSessionResponse(BaseModel):
 
 class AnalyticsEventRequest(BaseModel):
     event: str = Field(min_length=1, max_length=100)
-    session_id: Optional[str] = None
+    session_id: Optional[SessionId] = None
     properties: Optional[dict] = None
