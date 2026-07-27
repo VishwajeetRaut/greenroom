@@ -145,8 +145,13 @@ export const api = {
     return URL.createObjectURL(blob);
   },
 
-  getStats: () =>
-    request<Record<string, unknown>>("/analytics/stats"),
+  getStats: (opts: { days?: number; track?: string } = {}) => {
+    const params = new URLSearchParams();
+    if (opts.days != null) params.set("days", String(opts.days));
+    if (opts.track) params.set("track", opts.track);
+    const qs = params.toString();
+    return request<Record<string, unknown>>(`/analytics/stats${qs ? `?${qs}` : ""}`);
+  },
 
   // Fire-and-forget usage/click tracking — never throws, so callers can
   // invoke it inline without try/catch.
