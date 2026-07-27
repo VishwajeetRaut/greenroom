@@ -90,14 +90,25 @@ function ScoreDistChart({ data }) {
   );
 }
 
+const DAY_OPTIONS = [7, 14, 30, 90];
+const TRACK_OPTIONS = [
+  { value: "", label: "All tracks" },
+  { value: "behavioral", label: "Behavioral" },
+  { value: "technical", label: "Technical" },
+  { value: "system-design", label: "System Design" },
+];
+
 export default function Telemetry() {
   const [stats, setStats] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
+  const [days, setDays] = useState(14);
+  const [track, setTrack] = useState("");
   const navigate = useNavigate();
 
   useEffect(() => {
-    api.getStats()
+    setLoading(true);
+    api.getStats({ days, track: track || undefined })
       .then(setStats)
       .catch((err) => {
         if (err.message?.includes("401") || err.message?.includes("403")) {
@@ -107,7 +118,7 @@ export default function Telemetry() {
         }
       })
       .finally(() => setLoading(false));
-  }, [navigate]);
+  }, [navigate, days, track]);
 
   const trackKeys = ["behavioral", "technical", "system-design"];
   const maxTrackSessions = stats ? Math.max(...trackKeys.map(t => stats.sessions_by_track[t] || 0), 1) : 1;
@@ -123,8 +134,28 @@ export default function Telemetry() {
     <div className="min-h-screen bg-stage">
       <Navbar />
       <main className="mx-auto max-w-6xl px-6 py-10">
-        <div className="mb-8">
+        <div className="mb-8 flex flex-wrap items-center justify-between gap-4">
           <h1 className="font-display text-2xl text-cream">Telemetry</h1>
+          <div className="flex items-center gap-3">
+            <select
+              value={track}
+              onChange={(e) => setTrack(e.target.value)}
+              className="rounded-lg border border-white/10 bg-panel px-3 py-1.5 text-sm text-cream outline-none focus:border-amber/40"
+            >
+              {TRACK_OPTIONS.map((opt) => (
+                <option key={opt.value} value={opt.value}>{opt.label}</option>
+              ))}
+            </select>
+            <select
+              value={days}
+              onChange={(e) => setDays(Number(e.target.value))}
+              className="rounded-lg border border-white/10 bg-panel px-3 py-1.5 text-sm text-cream outline-none focus:border-amber/40"
+            >
+              {DAY_OPTIONS.map((d) => (
+                <option key={d} value={d}>Last {d} days</option>
+              ))}
+            </select>
+          </div>
         </div>
 
         {loading && (
@@ -192,10 +223,10 @@ export default function Telemetry() {
                 </div>
               </div>
 
-              {/* Sessions last 14 days */}
+              {/* Sessions over the selected window */}
               <div className="rounded-2xl border border-white/10 bg-panel px-6 py-5">
-                <h2 className="mb-4 text-sm font-medium text-cream">Sessions — last 14 days</h2>
-                <DailyChart data={stats.sessions_last_14_days} />
+                <h2 className="mb-4 text-sm font-medium text-cream">Sessions — last {days} days</h2>
+                <DailyChart data={stats.sessions_by_day} />
               </div>
 
               {/* Score distribution */}
