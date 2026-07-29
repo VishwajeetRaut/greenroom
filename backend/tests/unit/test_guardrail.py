@@ -115,6 +115,35 @@ def test_llm_judge_passes_clean_via_no_response(monkeypatch):
         assert _llm_judge("What do you think the complexity is?", "technical") is False
 
 
+def test_llm_judge_falls_back_to_ollama_when_groq_unreachable(monkeypatch):
+    """Groq down but the fallback provider is configured: the judge should
+    still fire, not just fail open — see services.guardrail._yes_no_judge."""
+    monkeypatch.setenv("GROQ_API_KEY", "test-key")
+    monkeypatch.setenv("FALLBACK_BASE_URL", "https://fallback.example.com/v1")
+    monkeypatch.setenv("FALLBACK_API_KEY", "fallback-key")
+    mock_yes = type("R", (), {
+        "raise_for_status": lambda self: None,
+        "json": lambda self: {"choices": [{"message": {"content": "YES"}}]},
+    })()
+
+    def fake_post(url, **kwargs):
+        if "groq" in url:
+            raise Exception("connection refused")
+        assert "fallback.example.com" in url
+        return mock_yes
+
+    with patch("httpx.post", side_effect=fake_post):
+        assert _llm_judge("Some novel phrasing that means linear time", "technical") is True
+
+
+def test_llm_judge_fails_open_when_both_providers_unreachable(monkeypatch):
+    monkeypatch.setenv("GROQ_API_KEY", "test-key")
+    monkeypatch.setenv("FALLBACK_BASE_URL", "https://fallback.example.com/v1")
+    monkeypatch.setenv("FALLBACK_API_KEY", "fallback-key")
+    with patch("httpx.post", side_effect=Exception("connection refused")):
+        assert _llm_judge("Some text", "technical") is False
+
+
 def test_sanitize_triggers_regen_on_llm_judge_hit(monkeypatch):
     """LLM judge catches a leak that regex missed; sanitize should regen."""
     monkeypatch.setenv("GROQ_API_KEY", "test-key")
