@@ -88,6 +88,7 @@ def persist_evaluation(session_id: str, result: dict) -> None:
             "category": category.get("category"),
             "score": category.get("score"),
             "feedback": category.get("feedback"),
+            "topic": category.get("topic"),
         }).execute()
 
 

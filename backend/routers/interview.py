@@ -408,7 +408,10 @@ async def end_session(req: EndSessionRequest, user: AuthenticatedUser = Depends(
             session["status"] = "completed"
             return EndSessionResponse(overall_score=0, summary=empty_result["summary"], evaluations=[])
 
-        result = await run_in_threadpool(llm.evaluate_session, session["track"], session["role"], session["history"])
+        result = await run_in_threadpool(
+            llm.evaluate_session, session["track"], session["role"], session["history"],
+            session.get("assigned_question"),
+        )
 
         # For system-design sessions: score the candidate's diagram separately
         diagram_eval = None
