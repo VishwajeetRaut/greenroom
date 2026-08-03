@@ -5,18 +5,6 @@ import Footer from "../components/Footer";
 import { supabase } from "../lib/supabaseClient";
 import Losgann from "../components/Losgann";
 
-function EvalCard({ e }) {
-  return (
-    <div className="rounded-2xl border border-white/10 bg-panel p-6">
-      <div className="flex items-center justify-between">
-        <h3 className="font-display text-lg capitalize">{e.category}</h3>
-        <span className="font-display text-2xl text-sage">{e.score}/10</span>
-      </div>
-      <p className="mt-2 text-sm text-mute">{e.feedback}</p>
-    </div>
-  );
-}
-
 export default function Results() {
   const { sessionId } = useParams();
   const [session, setSession] = useState(null);
@@ -269,6 +257,18 @@ export default function Results() {
         </section>
       </main>
       <Footer />
+    </div>
+  );
+}
+
+function EvalCard({ e }) {
+  return (
+    <div className="rounded-2xl border border-white/10 bg-panel p-6">
+      <div className="flex items-center justify-between">
+        <h3 className="font-display text-lg capitalize">{e.category}</h3>
+        <span className="font-display text-2xl text-sage">{e.score}/10</span>
+      </div>
+      <p className="mt-2 text-sm text-mute">{e.feedback}</p>
     </div>
   );
 }
