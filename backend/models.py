@@ -103,6 +103,7 @@ class EvaluationCategory(BaseModel):
     category: str
     score: int
     feedback: str
+    topic: Optional[str] = None
 
 
 class STARAnalysis(BaseModel):

@@ -85,19 +85,37 @@ export default function Results() {
                 </div>
               )}
 
-              {evaluations.length > 0 && (
-                <div className="mt-6 grid gap-4 sm:grid-cols-2">
-                  {evaluations.map((e) => (
-                    <div key={e.id} className="rounded-2xl border border-white/10 bg-panel p-6">
-                      <div className="flex items-center justify-between">
-                        <h3 className="font-display text-lg capitalize">{e.category}</h3>
-                        <span className="font-display text-2xl text-sage">{e.score}/10</span>
+              {evaluations.length > 0 && (() => {
+                // Technical evaluations may be tagged with the question's
+                // topic (e.g. "dynamic programming") — group those under a
+                // topic heading instead of one flat, undifferentiated grid.
+                const grouped = {};
+                const ungrouped = [];
+                for (const e of evaluations) {
+                  if (e.topic) (grouped[e.topic] ||= []).push(e);
+                  else ungrouped.push(e);
+                }
+                const topics = Object.keys(grouped);
+                return (
+                  <div className="mt-6 space-y-8">
+                    {ungrouped.length > 0 && (
+                      <div className="grid gap-4 sm:grid-cols-2">
+                        {ungrouped.map((e) => <EvalCard key={e.id} e={e} />)}
                       </div>
-                      <p className="mt-2 text-sm text-mute">{e.feedback}</p>
-                    </div>
-                  ))}
-                </div>
-              )}
+                    )}
+                    {topics.map((topic) => (
+                      <div key={topic}>
+                        <h3 className="mb-3 text-xs font-medium uppercase tracking-wide text-amber">
+                          Topic: {topic}
+                        </h3>
+                        <div className="grid gap-4 sm:grid-cols-2">
+                          {grouped[topic].map((e) => <EvalCard key={e.id} e={e} />)}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                );
+              })()}
 
               {star && (() => {
                 const elements = ["situation", "task", "action", "result"];
@@ -239,6 +257,18 @@ export default function Results() {
         </section>
       </main>
       <Footer />
+    </div>
+  );
+}
+
+function EvalCard({ e }) {
+  return (
+    <div className="rounded-2xl border border-white/10 bg-panel p-6">
+      <div className="flex items-center justify-between">
+        <h3 className="font-display text-lg capitalize">{e.category}</h3>
+        <span className="font-display text-2xl text-sage">{e.score}/10</span>
+      </div>
+      <p className="mt-2 text-sm text-mute">{e.feedback}</p>
     </div>
   );
 }

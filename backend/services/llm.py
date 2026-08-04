@@ -51,6 +51,10 @@ class CategoryScore(BaseModel):
     category: str
     score: int = Field(ge=0, le=10)
     feedback: str
+    topic: str | None = Field(
+        default=None,
+        description="For technical evaluations, the question topic (e.g. 'dynamic programming') this point relates to; null for points not tied to a specific topic",
+    )
 
 class EvaluationResult(BaseModel):
     overall_score: int = Field(ge=0, le=10)
@@ -182,6 +186,28 @@ Reply ONLY as valid JSON, no markdown fences:
   "feedback": "<string>"
 }}"""
 
+
+# Technical sessions get a topic-tagged, more granular set of evaluation
+# points instead of the generic clarity/structure/confidence trio — grouping
+# feedback under the actual question topic (e.g. "dynamic programming") is
+# what lets the Results page render a per-topic breakdown instead of one
+# flat, undifferentiated list.
+_TECHNICAL_TOPIC_NOTE = """
+
+This session's coding problem covers the topic "{topic}". In addition to clarity/structure/\
+confidence/technical depth, produce ONE evaluation entry for EACH of these specific points, \
+using these exact strings as "category" and tagging every one of them with "topic": "{topic}":
+  - "Problem Understanding" — did they correctly parse the requirements and constraints before coding?
+  - "Algorithmic Approach" — was the strategy they chose sound and appropriate for this {topic} problem?
+  - "Code Correctness" — does the code they actually submitted (see "[Candidate's submitted code]" \
+in the transcript, if present) solve the problem?
+  - "Code Quality & Style" — readability, naming, structure of the submitted code.
+  - "Edge Case Handling" — did they consider boundary, empty, or large inputs?
+  - "Complexity Analysis" — did they reason about time/space complexity, correctly or at all?
+  - "Communication" — did they narrate their thinking clearly while working through it?
+If the candidate never actually wrote code, still include all of the above with low scores/feedback \
+noting that, rather than omitting them."""
+
 EVAL_SYSTEM_PROMPT = """\
 You are an expert interview coach analysing a mock {track} interview for a {role} role.
 
@@ -189,6 +215,7 @@ Your job:
 1. Score the candidate on clarity, structure, and confidence (1-10 each). For technical/system-design tracks also score "technical depth".
 2. Perform a STAR-framework analysis (behavioral tracks) or solution-quality analysis (technical/system-design). Score STAR completeness 0-10 and list any missing elements.
 3. Write a 2-3 sentence overall summary. End with the single most actionable improvement.
+{technical_topic_note}
 
 Reply ONLY as valid JSON matching this exact schema — no markdown fences, no extra keys:
 {{
@@ -203,7 +230,7 @@ Reply ONLY as valid JSON matching this exact schema — no markdown fences, no e
     "missing_elements": ["<string>", ...]
   }},
   "evaluations": [
-    {{"category": "<string>", "score": <int 0-10>, "feedback": "<string>"}},
+    {{"category": "<string>", "topic": "<string or null>", "score": <int 0-10>, "feedback": "<string>"}},
     ...
   ]
 }}"""
@@ -223,7 +250,9 @@ a weak answer, or vice versa).
 If the draft evaluation is already accurate and well-grounded, return it UNCHANGED. Only edit scores \
 or text where you find a genuine mismatch — do not make cosmetic changes for their own sake.
 
-Reply ONLY as valid JSON matching this exact schema — no markdown fences, no extra keys, no commentary:
+Reply ONLY as valid JSON matching this exact schema — no markdown fences, no extra keys, no commentary. \
+Preserve each entry's "topic" field exactly as given in the draft (null if the draft had none) — \
+do not drop or invent topics:
 {{
   "overall_score": <int 0-10>,
   "summary": "<string>",
@@ -236,7 +265,7 @@ Reply ONLY as valid JSON matching this exact schema — no markdown fences, no e
     "missing_elements": ["<string>", ...]
   }},
   "evaluations": [
-    {{"category": "<string>", "score": <int 0-10>, "feedback": "<string>"}},
+    {{"category": "<string>", "topic": "<string or null>", "score": <int 0-10>, "feedback": "<string>"}},
     ...
   ]
 }}"""
@@ -435,7 +464,11 @@ def _self_critique(track: str, role: str, transcript: str, draft: dict) -> dict:
             f"Transcript:\n{transcript or 'The candidate did not answer any questions.'}\n\n"
             f"Draft evaluation to review:\n{json.dumps(draft)}"
         )
-        llm = _make_llm(temperature=0.2, max_tokens=700)
+        # Mirror evaluate_session's budget bump — a draft with the topic-tagged
+        # breakdown (more evaluation entries) needs more room to be echoed
+        # back, corrected, than the original 4-6 entry default.
+        critique_max_tokens = 1400 if len(draft.get("evaluations", [])) > 6 else 700
+        llm = _make_llm(temperature=0.2, max_tokens=critique_max_tokens)
         llm_json = llm.bind(response_format={"type": "json_object"})
         parser = JsonOutputParser(pydantic_object=EvaluationResult)
         chain = llm_json | parser
@@ -465,20 +498,32 @@ def _validate_eval_result(result: dict) -> dict:
     return validated.model_dump()
 
 
-def evaluate_session(track: str, role: str, history: list[dict]) -> dict:
+def evaluate_session(
+    track: str, role: str, history: list[dict], assigned_question: dict | None = None,
+) -> dict:
     """
     LangChain LCEL evaluation chain:
       ChatPromptTemplate(system + transcript)
       | ChatGroq (json_mode)
       | JsonOutputParser(EvaluationResult)
     Falls back to Ollama-cloud on Groq rate-limit / server error.
+
+    assigned_question: the technical problem this session was graded on, if any —
+    when its "topic" is set, the evaluation is asked for a topic-tagged, more
+    granular breakdown (see _TECHNICAL_TOPIC_NOTE) instead of the generic default.
     """
     transcript = "\n".join(
         f"{'Interviewer' if t['role'] == 'interviewer' else 'Candidate'}: {t['content']}"
         for t in history
     )
 
-    system_content = EVAL_SYSTEM_PROMPT.format(track=track, role=role)
+    topic = (assigned_question or {}).get("topic") if track == "technical" else None
+    technical_topic_note = _TECHNICAL_TOPIC_NOTE.format(topic=topic) if topic else ""
+    system_content = EVAL_SYSTEM_PROMPT.format(track=track, role=role, technical_topic_note=technical_topic_note)
+    # The topic-tagged breakdown asks for ~7 extra evaluation entries on top
+    # of the default set — the flat 700-token budget was sized for the
+    # shorter generic list and would truncate the JSON otherwise.
+    eval_max_tokens = 1400 if technical_topic_note else 700
 
     # Build messages directly — the eval prompt contains literal JSON braces
     # which LangChain's template parser would misinterpret as variables.
@@ -490,7 +535,7 @@ def evaluate_session(track: str, role: str, history: list[dict]) -> dict:
     parser = JsonOutputParser(pydantic_object=EvaluationResult)
 
     try:
-        llm = _make_llm(temperature=0.3, max_tokens=700)
+        llm = _make_llm(temperature=0.3, max_tokens=eval_max_tokens)
         llm_json = llm.bind(response_format={"type": "json_object"})
         chain = llm_json | parser
         result = chain.invoke(lc_messages)
@@ -508,7 +553,7 @@ def evaluate_session(track: str, role: str, history: list[dict]) -> dict:
                     {"role": "system", "content": system_content},
                     {"role": "user",   "content": transcript or "The candidate did not answer any questions."},
                 ],
-                max_tokens=700, temperature=0.3, json_mode=True,
+                max_tokens=eval_max_tokens, temperature=0.3, json_mode=True,
             )
             try:
                 # Some fallback providers wrap JSON in markdown fences even
