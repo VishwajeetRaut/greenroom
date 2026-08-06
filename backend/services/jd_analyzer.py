@@ -229,6 +229,20 @@ def topics_for_track(profile: dict | None, track: str) -> list[str]:
     }.get(track, ""), []) or []
 
 
+_SENIORITY_TIER = {"junior": "easy", "mid": "medium", "senior": "hard", "staff": "hard"}
+
+
+def scale_tier_for(profile: dict | None) -> str | None:
+    """A single difficulty tier for system-design scale numbers.
+
+    Distinct from difficulty_for, which returns a *band* used to filter which
+    questions are eligible. This picks the one tier a chosen question should
+    actually be posed at — so a senior candidate gets the harder numbers on
+    the same problem, rather than only being shown different problems.
+    None means "use the question's own native difficulty"."""
+    return _SENIORITY_TIER.get((profile or {}).get("seniority") or "")
+
+
 def difficulty_for(profile: dict | None) -> list[str] | None:
     """None means "caller keeps its own default" — an unknown seniority must
     not silently narrow the pool."""

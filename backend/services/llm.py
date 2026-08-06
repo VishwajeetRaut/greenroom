@@ -24,7 +24,7 @@ from langchain_groq import ChatGroq
 from langchain_openai import AzureChatOpenAI
 from pydantic import BaseModel, Field
 
-from services import guardrail, jd_analyzer, llm_cache, token_meter
+from services import guardrail, jd_analyzer, llm_cache, question_bank, token_meter
 from services.logger import log
 
 # ── env ──────────────────────────────────────────────────────────────────────
@@ -431,6 +431,24 @@ def next_question(
             "Keep probing the candidate's design choices, component selection, trade-offs, "
             "and how they would handle scale and failure."
         )
+        # Concrete numbers, so "how would you handle scale?" becomes "how does
+        # this hold at 2B writes/day?". Without these the interviewer probes
+        # scale in the abstract, which is the vaguest part of a system-design
+        # session and the easiest for a candidate to hand-wave through.
+        scale_lines = question_bank.format_scale(
+            question_bank.scale_for(assigned_question, assigned_question.get("scale_tier"))
+        )
+        if scale_lines:
+            system_prompt += (
+                "\n\nHold the candidate to THESE numbers — state them when you introduce the "
+                "problem, and refer back to them when probing scale:\n"
+                + "\n".join(f"- {line}" for line in scale_lines)
+            )
+        if assigned_question.get("core_challenge"):
+            system_prompt += (
+                f"\n\nThe crux of this problem is: {assigned_question['core_challenge']} "
+                "Make sure the candidate confronts it — but never hand them the answer."
+            )
     if track == "technical" and assigned_question:
         is_stdio = bool(assigned_question.get("tests") and "stdin" in assigned_question["tests"][0])
         if is_stdio:

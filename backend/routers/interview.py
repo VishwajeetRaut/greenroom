@@ -74,14 +74,20 @@ def _pick_jd_guided(picker, topics: list[str], role: str | None):
 
 def _question_context(assigned: dict) -> QuestionContext:
     is_stdio = bool(assigned.get("tests") and "stdin" in assigned["tests"][0])
+    # scale_tier is stamped onto the question at assignment time (see
+    # post_message); absent for tracks that don't carry scale metadata.
+    scale = question_bank.scale_for(assigned, assigned.get("scale_tier"))
     return QuestionContext(
         id=assigned["id"],
         title=assigned.get("title", ""),
-        difficulty=assigned.get("difficulty", ""),
+        difficulty=assigned.get("scale_tier") or assigned.get("difficulty", ""),
         prompt=assigned.get("prompt", ""),
         constraints=assigned.get("constraints") or [],
         examples=assigned.get("examples") or [],
         is_stdio=is_stdio,
+        tags=assigned.get("tags") or [],
+        core_challenge=assigned.get("core_challenge"),
+        scale=question_bank.format_scale(scale),
     )
 
 
@@ -216,6 +222,15 @@ async def post_message(req: MessageRequest, user: AuthenticatedUser = Depends(ge
                     _pick_jd_guided, question_bank.pick_behavioral_question,
                     jd_analyzer.topics_for_track(jd_profile, "behavioral"),
                     session["role"],
+                )
+            if session["assigned_question"] and session["track"] == "system-design":
+                # Pose the chosen problem at the scale the JD implies, rather
+                # than only at whatever scale it was authored with. Copied
+                # first so a session can't mutate the shared bank entry.
+                session["assigned_question"] = dict(session["assigned_question"])
+                session["assigned_question"]["scale_tier"] = (
+                    jd_analyzer.scale_tier_for(jd_profile)
+                    or session["assigned_question"].get("difficulty")
                 )
             if session["assigned_question"]:
                 session.setdefault("asked_question_ids", set()).add(session["assigned_question"]["id"])

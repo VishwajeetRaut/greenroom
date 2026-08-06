@@ -201,9 +201,46 @@ def pick_behavioral_question(
     return _weighted_choice(candidates, infer_seniority(role))
 
 
+_SCALE_FIELD_LABELS = {
+    "daily_active_users": "Daily active users",
+    "writes_per_day": "Writes/day",
+    "reads_per_day": "Reads/day",
+    "peak_qps": "Peak QPS",
+    "data_volume": "Data volume",
+    "latency_slo": "Latency SLO",
+}
+
+
+def scale_for(question: dict, tier: str | None) -> dict | None:
+    """The scale numbers to run this system-design question at.
+
+    Falls back to the question's own native difficulty when `tier` is None or
+    isn't defined for this question — so a question that only has metadata for
+    the tier it was authored at still works, and a question with no
+    `scale_tiers` at all returns None and the caller keeps using the authored
+    `constraints`. Both are ordinary, not error cases.
+    """
+    tiers = question.get("scale_tiers") or {}
+    if not tiers:
+        return None
+    return tiers.get(tier) or tiers.get(question.get("difficulty") or "medium") or None
+
+
+def format_scale(scale: dict | None) -> list[str]:
+    """Scale dict rendered as constraint-style lines, in a stable field order
+    (dict order comes from whatever the generator emitted, which varies)."""
+    if not scale:
+        return []
+    return [
+        f"{label}: {scale[field]}"
+        for field, label in _SCALE_FIELD_LABELS.items()
+        if scale.get(field)
+    ]
+
+
 def pick_system_design_question(
     topic: str | None = None, difficulty: str | list[str] | None = None,
-    role: str | None = None,
+    role: str | None = None, tags: list[str] | None = None,
 ) -> dict | None:
     """Random system-design question. Includes all difficulties by default (unlike
     pick_question which excludes hard). None if nothing matches.
@@ -211,8 +248,8 @@ def pick_system_design_question(
     role: when `difficulty` isn't explicitly pinned, skews the pick's
     difficulty mix by seniority (see pick_question).
 
-    topic: narrows the pool to what a pasted job description actually calls
-    for (see services.jd_analyzer). Deliberately kept separate from `role`:
+    topic/tags: narrow the pool to what a pasted job description actually
+    calls for (see services.jd_analyzer). Deliberately kept separate from `role`:
     seniority controls HOW HARD the question is via the weighting below, and
     topic controls WHICH question it is. Filtering on difficulty here as well
     would double-apply seniority and starve an already-uneven pool.
@@ -220,11 +257,15 @@ def pick_system_design_question(
     explicit_difficulty = difficulty is not None
     if isinstance(difficulty, str):
         difficulty = [difficulty]
+    wanted_tags = set(tags or [])
     candidates = [
         q for q in _all_questions()
         if q.get("track") == "system-design"
         and (topic is None or q.get("topic") == topic)
         and (difficulty is None or (q.get("difficulty") or "medium") in difficulty)
+        # Any-match, not all-match: tags describe characteristics, and requiring
+        # every one of them would almost always return nothing.
+        and (not wanted_tags or wanted_tags & set(q.get("tags") or []))
     ]
     if not candidates:
         return None
