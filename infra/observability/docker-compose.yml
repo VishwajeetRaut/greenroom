@@ -1,0 +1,84 @@
+# Prometheus + Grafana for Greenroom.
+#
+#   cd infra/observability && docker compose up -d
+#   Grafana  http://localhost:3001  (admin / admin on first login)
+#   Prom     http://localhost:9090
+#
+# Ports are overridable — Grafana defaults to 3001 rather than its usual 3000
+# because a dev frontend commonly already holds 3000:
+#   GRAFANA_PORT=3005 docker compose up -d
+#
+# Scrapes the backend's /metrics endpoint. The dashboard and the Prometheus
+# datasource are provisioned from files in this directory, so a fresh `up`
+# comes with the dashboard already loaded — nothing to click.
+#
+# host.docker.internal points at a backend running on the host (the normal
+# local setup). Against a deployed backend, override PROM_TARGET in .env or
+# edit prometheus.yml.
+services:
+  prometheus:
+    image: prom/prometheus:v2.54.1
+    container_name: greenroom-prometheus
+    ports: ["${PROMETHEUS_PORT:-9090}:9090"]
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./alerts.yml:/etc/prometheus/alerts.yml:ro
+      - prometheus-data:/prometheus
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=15d
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+  grafana:
+    image: grafana/grafana:11.2.0
+    container_name: greenroom-grafana
+    ports: ["${GRAFANA_PORT:-3001}:3000"]
+    depends_on: [prometheus]
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: admin
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      # Local-only stack. Do not expose this without changing the password.
+      GF_AUTH_ANONYMOUS_ENABLED: "false"
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana-data:/var/lib/grafana
+
+  # ── logs ──────────────────────────────────────────────────────────────────
+  # The "stream logs and store them" half of the pipeline. services/logger.py
+  # has emitted structured JSON per line since day one; nothing consumed it.
+  # Point the backend's stdout at ./logs and Promtail ships it into Loki, where
+  # Grafana can query it beside the metrics.
+  #
+  #   cd backend && python -m uvicorn main:app --port 8000 --no-access-log \
+  #     | tee ../infra/observability/logs/greenroom.log
+  #
+  # --no-access-log because main.py's request_logger middleware already records
+  # every request, with the route template and latency uvicorn's plain-text
+  # access line doesn't carry. Leaving it on ingests each request twice, and
+  # the uvicorn line isn't JSON so it lands in Loki without an `event` label.
+  loki:
+    image: grafana/loki:3.1.1
+    container_name: greenroom-loki
+    ports: ["${LOKI_PORT:-3100}:3100"]
+    command: -config.file=/etc/loki/loki-config.yml
+    volumes:
+      - ./loki-config.yml:/etc/loki/loki-config.yml:ro
+      - loki-data:/loki
+
+  promtail:
+    image: grafana/promtail:3.1.1
+    container_name: greenroom-promtail
+    depends_on: [loki]
+    command: -config.file=/etc/promtail/promtail-config.yml
+    volumes:
+      - ./promtail-config.yml:/etc/promtail/promtail-config.yml:ro
+      - ./logs:/var/log/greenroom:ro
+
+volumes:
+  prometheus-data:
+  grafana-data:
+  loki-data:

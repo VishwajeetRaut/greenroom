@@ -26,7 +26,7 @@ import os
 import random
 import re
 
-from services import token_meter
+from services import metrics, token_meter
 
 _COMPLEXITY_PATTERNS = [
     re.compile(r"O\(\s*[a-zA-Z0-9log\s\*\+\^,]+\s*\)"),
@@ -173,16 +173,29 @@ def sanitize(draft: str, track: str, regenerate_fn) -> str:
     layer1 = violates(draft, track)
     layer2 = not layer1 and _llm_judge(draft, track)
 
+    # EVALUATION_METRICS.md §6 called the guardrail "not yet measurable at
+    # scale" because nothing recorded when a layer fired versus passed clean.
+    # Recorded per layer, not just overall, because the regex and the judge
+    # catching different things is the whole argument for having both.
+    metrics.record_guardrail(track, "regex", layer1)
+    if not layer1:
+        metrics.record_guardrail(track, "llm_judge", layer2)
+
     if not layer1 and not layer2:
         return draft
 
     try:
         retry = regenerate_fn()
         if not violates(retry, track) and not _llm_judge(retry, track):
+            metrics.record_guardrail(track, "regenerate", False)
             return retry
     except Exception:
         pass
 
+    # Both the draft and its rewrite leaked — the candidate gets a canned
+    # question instead. This is the layer to alert on: it means the model is
+    # ignoring prompt hardening AND failing to correct itself.
+    metrics.record_guardrail(track, "safe_fallback", True)
     return random.choice(_FALLBACK_QUESTIONS[track])
 
 

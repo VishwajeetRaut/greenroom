@@ -25,6 +25,7 @@ from services import (
     harness_generator,
     jd_analyzer,
     llm,
+    metrics,
     piston,
     question_bank,
     question_generator,
@@ -134,6 +135,7 @@ async def start_session(req: StartSessionRequest, user: AuthenticatedUser = Depe
         assigned_question_id=None,
     )
 
+    metrics.record_session(req.track, "started")
     return StartSessionResponse(session_id=session_id, track=req.track, question=greeting)
 
 

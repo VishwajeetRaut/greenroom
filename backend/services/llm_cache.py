@@ -51,6 +51,7 @@ import time
 from collections import OrderedDict
 from typing import Any, Callable, Iterable
 
+from services import metrics
 from services.logger import log
 
 # ── env ──────────────────────────────────────────────────────────────────────
@@ -221,6 +222,7 @@ def pooled_call(
     hit, value = _cache.take(key, pool_size)
     if hit:
         log.info("llm_cache.hit", namespace=namespace, pool_size=pool_size)
+        metrics.record_cache(namespace, hit=True)
         return value
 
     value = produce()
@@ -237,6 +239,7 @@ def pooled_call(
         pool_size=pool_size,
         cached=bool(value or cache_falsy),
     )
+    metrics.record_cache(namespace, hit=False)
     return value
 
 

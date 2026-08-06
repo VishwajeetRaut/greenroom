@@ -24,7 +24,7 @@ from langchain_groq import ChatGroq
 from langchain_openai import AzureChatOpenAI
 from pydantic import BaseModel, Field
 
-from services import guardrail, jd_analyzer, llm_cache, question_bank, token_meter
+from services import guardrail, jd_analyzer, llm_cache, metrics, question_bank, token_meter
 from services import transcript as transcript_builder
 from services.logger import log
 
@@ -781,6 +781,7 @@ def evaluate_session(track: str, role: str, history: list[dict]) -> dict:
     if not fits:
         result = _evaluate_chunked(track, role, history)
         if result:
+            metrics.record_evaluation(track, "chunked")
             _reconcile_score(result)
             return _self_critique(track, role, transcript, result)
         # Chunking failed too — fall through and try the compacted transcript
@@ -793,9 +794,14 @@ def evaluate_session(track: str, role: str, history: list[dict]) -> dict:
         track, role, transcript, EVAL_SYSTEM_PROMPT.format(track=track, role=role),
     )
     if not result:
+        # Both providers failed and the candidate is getting the placeholder
+        # report. This is the metric to alert on — it is the worst outcome the
+        # evaluation path can produce, and it is invisible to the candidate.
         log.warning("llm.evaluate_session.defaulted", track=track)
+        metrics.record_evaluation(track, "defaulted")
         return _default_evaluation()
 
+    metrics.record_evaluation(track, "single_pass")
     _reconcile_score(result)
     return _self_critique(track, role, transcript, result)
 

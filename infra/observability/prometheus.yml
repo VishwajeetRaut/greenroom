@@ -1,0 +1,16 @@
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+rule_files:
+  - /etc/prometheus/alerts.yml
+
+scrape_configs:
+  - job_name: greenroom-api
+    metrics_path: /metrics
+    static_configs:
+      # host.docker.internal = a backend running on the host machine.
+      # Point this at the Container App's internal address when deployed.
+      - targets: ["host.docker.internal:8000"]
+        labels:
+          service: greenroom-api

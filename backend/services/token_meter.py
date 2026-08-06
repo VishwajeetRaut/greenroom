@@ -42,6 +42,7 @@ from typing import Any
 
 from langchain_core.callbacks import BaseCallbackHandler
 
+from services import metrics
 from services.logger import log
 
 # ── pricing ──────────────────────────────────────────────────────────────────
@@ -149,6 +150,8 @@ def record(
     if not METER_ENABLED:
         return
     _meter.add(call_site, provider, model, input_tokens, output_tokens)
+    metrics.record_llm(call_site, provider, model, input_tokens, output_tokens,
+                       cost_usd(model, input_tokens, output_tokens))
     log.info(
         "llm.usage",
         call_site=call_site,

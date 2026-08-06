@@ -212,6 +212,20 @@ When a system-design session ends, `llm.evaluate_diagram()` scores the candidate
 
 `GET /api/tts/speak` previously regenerated audio via `edge-tts` from scratch on every call, even for text already synthesized moments earlier — a candidate replaying the interviewer's question, or navigating back to one already asked, paid the full latency and (conceptually) cost again. `services/tts.py` now caches on disk, keyed by `sha256(voice:text)`, with atomic writes (temp file + rename) and LRU eviction once the cache exceeds a bounded entry count.
 
+### Metrics and alerting: what the structured logger was always for
+
+`services/logger.py` has emitted one structured JSON object per line since day one, and until now nothing consumed it. That is why `docs/EVALUATION_METRICS.md` §6 and §7 could list four things as *not yet measurable* despite the app already logging all four: the data existed, it just went to stdout and stopped there.
+
+`services/metrics.py` exposes Prometheus counters and histograms at `GET /metrics`, attached at the points that already existed — the request middleware, `token_meter.record` (the single chokepoint every LLM call passes through), `guardrail.sanitize`, and `piston.run_code`. `infra/observability/` is a provisioned Prometheus + Grafana + Loki + Promtail stack: metrics from `/metrics`, logs shipped from the JSON the logger already writes.
+
+The four gaps closed: **P50/P95 latency** (`greenroom_http_request_duration_seconds`), **LLM fallback rate** (`greenroom_llm_fallback_total`), **Piston vs Wandbox split** (`greenroom_sandbox_runs_total{backend}`), and **guardrail trigger rate** (`greenroom_guardrail_checks_total{layer,result}` — per layer, because the regex and the LLM judge catching different things is the entire argument for having both).
+
+**Every alert names a failure that is invisible to the candidate but ruins their session.** That is the distinction worth designing around: a candidate who receives a placeholder evaluation, or a canned guardrail fallback question instead of a real follow-up, sees a working product and a worse interview. `EvaluationsDefaulting` is the sharpest of these — both providers failed and the candidate got nothing after finishing a whole interview.
+
+**Cardinality is enforced, not hoped for.** HTTP paths are recorded as the route template (`/api/interview/{session_id}/resume`), never the raw path, and unmatched requests collapse to `unmatched` rather than the URL — a 404 flood is exactly when minting a time series per URL would hurt most. In Loki only `level` and `event` become labels; both are closed sets. Tests assert both rules, and assert that no label value ever looks like a UUID or an email.
+
+`/metrics` is unauthenticated by design (scrapers don't carry bearer tokens) and exposes only aggregate counters — no prompts, transcripts, or user identifiers. Restrict it at the ingress if it ever leaves the VNet.
+
 ### Evaluating a long session without blowing the token budget
 
 Every candidate turn appends the candidate's *entire current code* to the history (`candidate_content += f"\n\n[Candidate's current code]\n{req.code}"`). `code` is capped at 100,000 characters and `message` at 20,000, across up to 15 candidate turns — so a transcript can reach ~1.8M characters, most of it duplicated copies of earlier revisions of one program. System-design sessions do the same with the serialised `[Architecture diagram]` block.
@@ -424,6 +438,7 @@ SESSION_IDLE_TIMEOUT_MINUTES=30        # Default: 30
 MAX_CANDIDATE_TURNS=15                 # Default: 15
 MAX_SESSION_DURATION_MINUTES=120       # Default: 120 (wall-clock cap)
 EVAL_MAX_TRANSCRIPT_TOKENS=12000       # Default: 12000 (transcript budget)
+METRICS_ENABLED=true                   # Default: true (Prometheus /metrics)
 EVAL_SELF_CRITIQUE_ENABLED=true        # Default: true
 
 # Azure OpenAI — end-of-session evaluation report only (evaluate_session,
