@@ -43,7 +43,9 @@ from services.session_guard import (
     check_idle_timeout,
     check_ownership,
     check_session_limit,
+    is_duration_limit_reached,
     is_turn_limit_reached,
+    touch,
 )
 from services.session_store import SESSIONS, evict, get_session, now, session_lock
 from services.supabase_client import get_supabase
@@ -118,6 +120,7 @@ async def start_session(req: StartSessionRequest, user: AuthenticatedUser = Depe
         "assigned_question": None,
         "next_sequence_no": 1,
         "last_activity_at": now(),
+        "started_at": now(),
         "job_description": req.job_description or None,
         "jd_profile": jd_profile,
         "status": "active",
@@ -165,7 +168,10 @@ async def post_message(req: MessageRequest, user: AuthenticatedUser = Depends(ge
         check_ownership(session, user)
         check_idle_timeout(session)
 
-        if is_turn_limit_reached(session):
+        if is_turn_limit_reached(session) or is_duration_limit_reached(session):
+            # Graceful, not a 410: the candidate has a full interview's work in
+            # this session and must still be able to end it and collect their
+            # evaluation. Only an ABANDONED session (idle timeout) expires hard.
             return MessageResponse(
                 question="We've covered a lot of ground. Click 'End session' whenever you're ready for your scored evaluation.",
                 done=True,
@@ -256,7 +262,7 @@ async def post_message(req: MessageRequest, user: AuthenticatedUser = Depends(ge
         session["history"].append({"role": "interviewer", "content": question})
         await run_in_threadpool(persist_message, req.session_id, "interviewer", question, session["next_sequence_no"])
         session["next_sequence_no"] += 1
-        session["last_activity_at"] = now()
+        touch(session)
 
     ctx = (
         _question_context(session["assigned_question"])
@@ -272,6 +278,9 @@ async def get_boilerplate(session_id: str, language: str, user: AuthenticatedUse
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
     check_ownership(session, user)
+
+    check_idle_timeout(session)
+    touch(session)
 
     assigned = session.get("assigned_question")
     if not assigned:
@@ -329,7 +338,14 @@ async def resume_session(session_id: str, user: AuthenticatedUser = Depends(get_
     # past SESSION_IDLE_TIMEOUT_MINUTES before being resumed would trip the
     # idle-timeout check on the very next message, immediately after the
     # candidate just resumed it.
-    session["last_activity_at"] = now()
+    #
+    # This is the one deliberate place that touches WITHOUT checking idle
+    # first, so resuming does revive an expired session. That's intended (an
+    # explicit resume by the owner is a real "I'm back" signal), and it is
+    # bounded: the wall-clock cap is measured from started_at and no amount of
+    # resuming moves it, so a session still cannot outlive
+    # MAX_SESSION_DURATION_MINUTES.
+    touch(session)
 
     ctx = _question_context(session["assigned_question"]) if session.get("assigned_question") else None
     return ResumeSessionResponse(
@@ -353,6 +369,9 @@ async def save_diagram(req: SaveDiagramRequest, user: AuthenticatedUser = Depend
         raise HTTPException(status_code=404, detail="Session not found")
     check_ownership(session, user)
 
+    check_idle_timeout(session)
+    touch(session)
+
     session["diagram_elements"] = req.elements
     await run_in_threadpool(persist_diagram, req.session_id, req.elements)
     return {"saved": True}
@@ -366,6 +385,10 @@ async def run_tests(req: RunTestsRequest, user: AuthenticatedUser = Depends(get_
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
     check_ownership(session, user)
+    # Order matters: expire an abandoned session BEFORE touching it, or any
+    # request could revive one that had already timed out.
+    check_idle_timeout(session)
+    touch(session)
 
     assigned = session.get("assigned_question")
     bank_lang = "cpp" if req.language == "gcc" else req.language

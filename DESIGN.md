@@ -115,15 +115,26 @@ The rate limiter uses a `rate_limit_events` table in Supabase, with one row per 
 | Persistence across restart | Lost | Survives restarts |
 | Local dev without DB | Only mode | Auto-fallback |
 
-### Session concurrency cap, idle timeout, and turn limit
+### Session limits: concurrency, idle, turns, and wall-clock duration
 
-Three independent session-level guards in `session_guard.py`:
+Four independent session-level guards in `session_guard.py`:
 
 - **Concurrency cap:** `check_session_limit()` counts `sessions WHERE status='active' AND user_id=?`. Returns HTTP 429 if >= 3. Configurable via `MAX_ACTIVE_SESSIONS`.
 - **Idle timeout:** `check_idle_timeout()` compares `last_activity_at` against `now()`. Returns HTTP 410 if > 30 minutes idle. Configurable via `SESSION_IDLE_TIMEOUT_MINUTES`.
-- **Turn limit:** `is_turn_limit_reached()` counts candidate turns in the session history. Once `MAX_CANDIDATE_TURNS` (default 15) is reached, the interviewer wraps the session up instead of continuing to ask questions, so a session can't run indefinitely.
+- **Turn limit:** `is_turn_limit_reached()` counts candidate turns in the session history. Once `MAX_CANDIDATE_TURNS` (default 15) is reached, the interviewer wraps the session up instead of continuing to ask questions.
+- **Wall-clock duration:** `is_duration_limit_reached()` measures from `started_at` and is unaffected by activity. Default 120 minutes, configurable via `MAX_SESSION_DURATION_MINUTES`.
 
-All three run on every `/message` call after JWT validation, before the LLM call.
+**Idle and duration are different failures and end differently.** An idle session was *abandoned*, so it expires hard with a 410. A session that hit the turn or duration limit was *used* — the candidate has an hour or more of work in it, so it ends gracefully (`done: true`) and they can still click "End session" and collect the evaluation they earned. Expiring that with a 410 would throw the work away.
+
+Until the duration cap existed, nothing actually bounded a session: the turn limit caps how much is *said*, and the idle timeout only measures *gaps*, so a candidate answering every 29 minutes could hold a session — and one of their three concurrent slots, and a replica's memory — open for most of a day.
+
+#### Activity is more than messages
+
+The idle timer used to be refreshed by only two endpoints, `POST /message` and `GET /resume`. Running tests, switching language and editing the diagram were all invisible to it. The consequence: **a candidate who spent half an hour coding, or drawing — which is most of a system-design session — got a 410 on their next message despite never having stopped working.** The Excalidraw canvas autosaves every two seconds and counted for nothing.
+
+`touch(session)` now records activity, and every endpoint a candidate can reach while working calls it: `/message`, `/code/test`, `/diagram`, `/boilerplate`, and `/resume`. A test asserts this by inspecting the router source, because forgetting one fails silently — the candidate just gets a 410 later, far from the cause.
+
+Order matters: `check_idle_timeout()` runs **before** `touch()`, or any request could revive a session that had already expired. `/resume` is the one deliberate exception — an explicit resume by the owner is a real "I'm back" signal — and it is bounded, because the wall-clock cap is measured from `started_at` and no amount of resuming moves it.
 
 ### Judge0-based code execution (Piston + Wandbox retired, 2026-08-03)
 
@@ -391,6 +402,7 @@ ALLOWED_ORIGINS=https://greenroom-frontend...azurecontainerapps.io
 MAX_ACTIVE_SESSIONS=3                  # Default: 3
 SESSION_IDLE_TIMEOUT_MINUTES=30        # Default: 30
 MAX_CANDIDATE_TURNS=15                 # Default: 15
+MAX_SESSION_DURATION_MINUTES=120       # Default: 120 (wall-clock cap)
 EVAL_SELF_CRITIQUE_ENABLED=true        # Default: true
 
 # Azure OpenAI — end-of-session evaluation report only (evaluate_session,
