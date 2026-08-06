@@ -205,6 +205,20 @@ When a system-design session ends, `llm.evaluate_diagram()` scores the candidate
 
 `evaluate_session()` runs a second LLM pass after the draft score and feedback are generated: a reviewer persona checks the draft against the transcript and corrects it where the score doesn't match the written feedback, the feedback reads as generic filler, or the transcript has evidence the first pass missed. If the draft already holds up, the reviewer is instructed to leave it unchanged rather than edit for its own sake. The pass is best-effort — any failure (bad JSON, LLM error) just falls back to the original draft, so it can never turn a working evaluation into a broken one, and it's controlled by `EVAL_SELF_CRITIQUE_ENABLED` so it can be switched off without a code change if it adds latency or cost that isn't worth it.
 
+### Job description: analysed once, then it actually steers the interview
+
+A pasted job description used to do exactly two things: get appended verbatim to the interviewer's system prompt, and nothing else. It never reached question selection — `question_generator.select_or_generate_question` was called with only `(role, candidate_intro)` — so a JD asking for a senior distributed-systems engineer heavy on graph algorithms still produced the same randomly chosen easy array problem as a blank JD.
+
+Compounding that, the `role` every prompt interpolated was the hardcoded string `"Software Engineer"`, sent as a literal by the frontend and defaulted identically in `StartSessionRequest`. Persona, question selection, and evaluation were all written for a generic SWE regardless of what the candidate pasted.
+
+`services/jd_analyzer.py` runs one LLM call at session start and turns the JD into a structured profile: role title, seniority, tech stack, topic preferences per track, and a one-line focus summary. That profile then replaces the hardcoded role for the whole session and flows into question selection — narrowing the catalog shown to the selector model, biasing the random fallback picker, and mapping seniority onto the bank's difficulty tiers (`senior`/`staff` → medium+hard).
+
+**The model never invents topic names.** The bank's `topic` field is a fixed and genuinely inconsistent vocabulary (`hash-table` but `binary search`, `dynamic-programming` but `data structures`), so free-text topics would match no question and silently degrade to a random pick. The real vocabulary is read out of the bank, shown to the model, and anything returned outside it is dropped — the same constrain-then-validate-anyway approach `_build_catalog` uses.
+
+**Every narrowing widens back rather than starving.** Topic coverage is very uneven (81 `array` questions, 3 `graph`), so a strict filter would routinely match nothing. Each filter falls back to difficulty-only, then to unfiltered. A JD must be able to steer the choice; it must never be able to leave a candidate with no question at all. Likewise every analysis failure path returns `None`, and `None` restores exactly the pre-existing behaviour — a JD can degrade selection back to random, never block a session from starting.
+
+Sending the compact profile instead of the raw paste is also a cost fix: the interviewer system prompt is re-sent on **every turn**, so a 5000-character JD was being paid for once per turn, on the call that is already 61% of session cost (see [MODEL_COST_MATRIX.md](./docs/MODEL_COST_MATRIX.md)). The analysis itself is cached on the JD text — the same posting is routinely pasted by many candidates — so its one-time cost amortises toward zero.
+
 ### Content-addressed response cache for repeated LLM calls
 
 The durable, expensive artefacts — generated harnesses, signatures, and questions — were already cached in Supabase. What wasn't cached was the per-interaction traffic that repeats *within* a single coding interview.
@@ -451,6 +465,7 @@ backend/
     guardrail.py             # 4-layer answer-leak prevention: prompt + regex + regeneration + fallback
     llm_cache.py             # Content-addressed TTL+LRU cache for repeated LLM calls (test-case generation, opening greeting) with measured token-saving counters
     token_meter.py           # Provider-reported token accounting per call site, attached as a LangChain callback in _make_llm; feeds the model cost matrix
+    jd_analyzer.py           # One-call structured analysis of a pasted job description (role, seniority, stack, per-track topics from the bank's own vocabulary); drives role, question topic and difficulty
     supabase_client.py       # Singleton Supabase client using service-role key
     logger.py                # structlog JSON logger
     retry.py                 # Exponential-backoff retry decorator

@@ -31,7 +31,7 @@ import random
 import re
 import uuid
 
-from services import piston, question_bank
+from services import jd_analyzer, piston, question_bank
 
 _DIFFICULTY_GUIDANCE = {
     "junior": (
@@ -60,7 +60,7 @@ Candidate's introduction (use this to pick something that actually fits their ba
 don't default to the same generic crowd-pleaser every time; choose what's genuinely the best \
 match for THIS candidate, including their stated interests, stack, and experience level):
 \"\"\"{candidate_intro}\"\"\"
-
+{jd_note}
 Below is the catalog of problems already available (id | topic | difficulty | title), in \
 randomized order. These are pre-verified to run correctly in Python, JavaScript, Java, AND C++ — \
 generated problems only reliably support Python/JavaScript (Java/C++ execution for a generated \
@@ -112,6 +112,35 @@ ONLY the Python code, no markdown fences, no explanation."""
 
 _MAX_CATALOG_ENTRIES = 200
 _TOPIC_PERSIST_CAP = 25  # don't keep stacking generated problems onto an already-deep topic
+
+# Below this, a JD-narrowed catalog is too thin to be a real choice (the model
+# would be rubber-stamping whatever survived the filter), so the filter is
+# widened instead. The bank's topic distribution is very uneven — "graph" has
+# 3 entries, "array" has 81 — so this guard fires routinely, not rarely.
+_MIN_NARROWED_CATALOG = 8
+
+
+def _jd_note(jd_profile: dict | None) -> str:
+    """The JD's requirements, for the selection prompt. Empty string when there
+    is no JD, which leaves the prompt byte-identical to its pre-JD form."""
+    if not jd_profile:
+        return ""
+    lines = []
+    if jd_profile.get("seniority"):
+        lines.append(f"Seniority: {jd_profile['seniority']}")
+    if jd_profile.get("tech_stack"):
+        lines.append(f"Stack named in the job description: {', '.join(jd_profile['tech_stack'])}")
+    if jd_profile.get("technical_topics"):
+        lines.append(f"Topics the job description points to: {', '.join(jd_profile['technical_topics'])}")
+    if jd_profile.get("focus_summary"):
+        lines.append(f"What to probe hardest: {jd_profile['focus_summary']}")
+    if not lines:
+        return ""
+    return (
+        "\nThis candidate pasted a job description. It has already been analysed:\n"
+        + "\n".join(f"- {line}" for line in lines)
+        + "\nWeigh this at least as heavily as the candidate's introduction when choosing.\n"
+    )
 
 # Two Sum specifically is the single most overrepresented "safe default" in
 # every LLM's training data — empirically, it gets picked for almost any
@@ -218,6 +247,7 @@ def _has_real_signal(candidate_intro: str) -> bool:
 
 async def select_or_generate_question(
     role: str, candidate_intro: str = "", exclude_ids: set[str] | None = None,
+    jd_profile: dict | None = None,
 ) -> dict | None:
     """Main entry point. Returns a question dict (bank-shaped) or None if even
     the existing-bank fallback has nothing for this track — callers should
@@ -231,11 +261,39 @@ async def select_or_generate_question(
 
     exclude_ids: questions already assigned earlier in this session (see
     "Next question" in routers/interview.py) — skipped everywhere so
-    requesting another problem can't just re-serve the one just finished."""
+    requesting another problem can't just re-serve the one just finished.
+
+    jd_profile: structured analysis of the pasted job description
+    (services.jd_analyzer). Before this existed the JD reached the interviewer's
+    system prompt but never reached question selection at all, so a JD calling
+    for graph algorithms at senior level still produced a random easy array
+    problem. When present, its topics narrow BOTH the catalog shown to the
+    model and the random fallback picker, and its seniority sets the difficulty
+    band. Every narrowing widens back to the unfiltered pool if it would
+    otherwise leave nothing to pick — a JD must never be able to produce
+    "no question available"."""
     exclude_ids = exclude_ids or set()
-    fallback_pick = lambda: question_bank.pick_question(  # noqa: E731
-        "technical", language="python", exclude_ids=exclude_ids, role=role,
-    )
+    jd_topics = jd_analyzer.topics_for_track(jd_profile, "technical")
+
+    def fallback_pick():
+        """JD-topic-guided random pick, degrading to unfiltered rather than empty.
+
+        Difficulty is deliberately NOT filtered here — `role` already skews the
+        difficulty mix by inferred seniority (question_bank._weighted_choice),
+        and the JD's role title is what populates `role`. Filtering on
+        seniority again would double-apply it and starve an already-uneven
+        pool (81 "array" questions vs 3 "graph").
+        """
+        for topic in jd_topics:
+            picked = question_bank.pick_question(
+                "technical", language="python", topic=topic,
+                exclude_ids=exclude_ids, role=role,
+            )
+            if picked:
+                return picked
+        return question_bank.pick_question(
+            "technical", language="python", exclude_ids=exclude_ids, role=role,
+        )
 
     all_questions = await asyncio.to_thread(question_bank._all_questions)
     technical = [q for q in all_questions if q.get("track") == "technical" and q["id"] not in exclude_ids]
@@ -251,11 +309,27 @@ async def select_or_generate_question(
         # None outright and leaving the candidate with no problem at all.
 
     catalog_pool = [q for q in technical if q["id"] not in _EXCLUDED_FROM_AUTO_PICK]
+
+    # Narrow the catalog to the TOPICS the JD calls for, so the model chooses
+    # among relevant problems rather than hunting through a 200-entry shuffle.
+    # Only applied if it leaves a usable pool — a JD naming a topic the bank
+    # barely covers must widen back, not starve the choice down to one or two.
+    #
+    # Topics only, never difficulty: seniority is already applied twice below —
+    # once as _DIFFICULTY_GUIDANCE in the prompt, and once as the weighted pick
+    # in question_bank._weighted_choice. A third pass here would over-constrain
+    # a pool that is already very uneven (81 "array" questions vs 3 "graph").
+    if jd_topics:
+        narrowed = [q for q in catalog_pool if q.get("topic") in jd_topics]
+        if len(narrowed) >= _MIN_NARROWED_CATALOG:
+            catalog_pool = narrowed
+
     catalog = _build_catalog(catalog_pool)
     difficulty_options, difficulty_note = _DIFFICULTY_GUIDANCE[question_bank.infer_seniority(role)]
     system = _DECIDE_OR_GENERATE_SYSTEM.format(
         role=role, candidate_intro=candidate_intro or "(not provided)", catalog=catalog,
         difficulty_options=difficulty_options, difficulty_note=difficulty_note,
+        jd_note=_jd_note(jd_profile),
     )
     user_msg = "Choose now."
 

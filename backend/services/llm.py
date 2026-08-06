@@ -24,7 +24,7 @@ from langchain_groq import ChatGroq
 from langchain_openai import AzureChatOpenAI
 from pydantic import BaseModel, Field
 
-from services import guardrail, llm_cache, token_meter
+from services import guardrail, jd_analyzer, llm_cache, token_meter
 from services.logger import log
 
 # ── env ──────────────────────────────────────────────────────────────────────
@@ -383,7 +383,7 @@ def _opening_message_uncached(track: str, role: str) -> str:
 
 def next_question(
     track: str, role: str, history: list[dict], assigned_question: dict | None = None,
-    job_description: str | None = None, is_new_assignment: bool = False,
+    jd_profile: dict | None = None, is_new_assignment: bool = False,
 ) -> str:
     """
     LangChain LCEL interview chain:
@@ -407,8 +407,12 @@ def next_question(
     later test-runner can grade against verified canonical test cases.
     """
     system_prompt = TRACK_PERSONAS.get(track, TRACK_PERSONAS["behavioral"]).format(role=role)
-    if job_description:
-        system_prompt += f"\n\n[Job description the candidate is interviewing for]\n{job_description.strip()}"
+    # A compact structured profile, not the raw paste. The system prompt is
+    # re-sent on EVERY turn, so a 5000-char job description was being paid for
+    # once per turn — and the per-turn call is already 61% of session cost
+    # (docs/MODEL_COST_MATRIX.md). The profile carries the parts that actually
+    # steer the interview in a few hundred characters.
+    system_prompt += jd_analyzer.prompt_fragment(jd_profile)
     if track == "behavioral" and assigned_question:
         expected = assigned_question.get("expected_elements") or []
         elements_note = (

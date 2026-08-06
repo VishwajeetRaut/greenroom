@@ -23,6 +23,7 @@ from services import (
     adhoc_harness,
     guardrail,
     harness_generator,
+    jd_analyzer,
     llm,
     piston,
     question_bank,
@@ -50,6 +51,27 @@ from services.supabase_client import get_supabase
 router = APIRouter(prefix="/interview", tags=["interview"])
 
 
+def _pick_jd_guided(picker, topics: list[str], role: str | None):
+    """Runs `picker` against the JD's topics in priority order, then unfiltered.
+
+    The widening matters: the bank's topic coverage is very uneven (3
+    system-design entries mention caching, 4 mention infrastructure), so a
+    strict filter would frequently return nothing. A JD must be able to steer
+    the choice but must never be able to leave the candidate with no question
+    at all — which is what returning None here would mean.
+
+    `role` is passed straight through so the picker's own seniority weighting
+    still applies. The JD contributes the TOPIC; difficulty stays with
+    question_bank, which skews it by inferred seniority — and the JD's analysed
+    role title is what `session["role"]` holds, so that inference already sees
+    the JD's seniority without this filtering on it too."""
+    for topic in topics:
+        picked = picker(topic=topic, role=role)
+        if picked:
+            return picked
+    return picker(role=role)
+
+
 def _question_context(assigned: dict) -> QuestionContext:
     is_stdio = bool(assigned.get("tests") and "stdin" in assigned["tests"][0])
     return QuestionContext(
@@ -69,17 +91,29 @@ async def start_session(req: StartSessionRequest, user: AuthenticatedUser = Depe
     check_session_limit(user.id)
 
     session_id = str(uuid.uuid4())
-    greeting = await run_in_threadpool(llm.opening_message, req.track, req.role)
+
+    # Analyse the pasted job description once, here, rather than re-reading raw
+    # JD text on every turn. The resulting role title replaces req.role for the
+    # whole session: req.role is the hardcoded "Software Engineer" default (the
+    # frontend sends that literal string), so before this the persona, question
+    # selection and evaluation were all written for a generic SWE no matter what
+    # the candidate pasted. Returns None on any failure, which restores exactly
+    # the previous behaviour.
+    jd_profile = await run_in_threadpool(jd_analyzer.analyze, req.job_description)
+    effective_role = (jd_profile or {}).get("role_title") or req.role
+
+    greeting = await run_in_threadpool(llm.opening_message, req.track, effective_role)
 
     SESSIONS[session_id] = {
         "track": req.track,
-        "role": req.role,
+        "role": effective_role,
         "history": [{"role": "interviewer", "content": greeting}],
         "user_id": user.id,
         "assigned_question": None,
         "next_sequence_no": 1,
         "last_activity_at": now(),
         "job_description": req.job_description or None,
+        "jd_profile": jd_profile,
         "status": "active",
         "diagram_elements": [],
         "asked_question_ids": set(),
@@ -87,7 +121,7 @@ async def start_session(req: StartSessionRequest, user: AuthenticatedUser = Depe
     }
 
     await run_in_threadpool(
-        persist_session_start, session_id, user.id, req.track, req.role, greeting,
+        persist_session_start, session_id, user.id, req.track, effective_role, greeting,
         assigned_question_id=None,
     )
 
@@ -166,17 +200,22 @@ async def post_message(req: MessageRequest, user: AuthenticatedUser = Depends(ge
 
         if is_first_reply:
             session["candidate_intro"] = req.message
+            jd_profile = session.get("jd_profile")
             if session["track"] == "technical":
                 session["assigned_question"] = await question_generator.select_or_generate_question(
-                    session["role"], candidate_intro=req.message,
+                    session["role"], candidate_intro=req.message, jd_profile=jd_profile,
                 )
             elif session["track"] == "system-design":
                 session["assigned_question"] = await run_in_threadpool(
-                    question_bank.pick_system_design_question, None, session["role"]
+                    _pick_jd_guided, question_bank.pick_system_design_question,
+                    jd_analyzer.topics_for_track(jd_profile, "system-design"),
+                    session["role"],
                 )
             else:
                 session["assigned_question"] = await run_in_threadpool(
-                    question_bank.pick_behavioral_question, None, None, session["role"]
+                    _pick_jd_guided, question_bank.pick_behavioral_question,
+                    jd_analyzer.topics_for_track(jd_profile, "behavioral"),
+                    session["role"],
                 )
             if session["assigned_question"]:
                 session.setdefault("asked_question_ids", set()).add(session["assigned_question"]["id"])
@@ -185,6 +224,7 @@ async def post_message(req: MessageRequest, user: AuthenticatedUser = Depends(ge
             exclude_ids = session.get("asked_question_ids") or set()
             new_question = await question_generator.select_or_generate_question(
                 session["role"], candidate_intro=session.get("candidate_intro", ""), exclude_ids=exclude_ids,
+                jd_profile=session.get("jd_profile"),
             )
             if new_question:
                 session["assigned_question"] = new_question
@@ -195,7 +235,7 @@ async def post_message(req: MessageRequest, user: AuthenticatedUser = Depends(ge
 
         question = await run_in_threadpool(
             llm.next_question, session["track"], session["role"], session["history"],
-            session.get("assigned_question"), session.get("job_description"), is_first_reply or wants_new_question,
+            session.get("assigned_question"), session.get("jd_profile"), is_first_reply or wants_new_question,
         )
 
         session["history"].append({"role": "interviewer", "content": question})

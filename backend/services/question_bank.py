@@ -201,18 +201,29 @@ def pick_behavioral_question(
     return _weighted_choice(candidates, infer_seniority(role))
 
 
-def pick_system_design_question(difficulty: str | list[str] | None = None, role: str | None = None) -> dict | None:
+def pick_system_design_question(
+    topic: str | None = None, difficulty: str | list[str] | None = None,
+    role: str | None = None,
+) -> dict | None:
     """Random system-design question. Includes all difficulties by default (unlike
-    pick_question which excludes hard). None if the bank has no SD questions yet.
+    pick_question which excludes hard). None if nothing matches.
 
     role: when `difficulty` isn't explicitly pinned, skews the pick's
-    difficulty mix by seniority (see pick_question)."""
+    difficulty mix by seniority (see pick_question).
+
+    topic: narrows the pool to what a pasted job description actually calls
+    for (see services.jd_analyzer). Deliberately kept separate from `role`:
+    seniority controls HOW HARD the question is via the weighting below, and
+    topic controls WHICH question it is. Filtering on difficulty here as well
+    would double-apply seniority and starve an already-uneven pool.
+    """
     explicit_difficulty = difficulty is not None
     if isinstance(difficulty, str):
         difficulty = [difficulty]
     candidates = [
         q for q in _all_questions()
         if q.get("track") == "system-design"
+        and (topic is None or q.get("topic") == topic)
         and (difficulty is None or (q.get("difficulty") or "medium") in difficulty)
     ]
     if not candidates:
