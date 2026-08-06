@@ -205,6 +205,16 @@ When a system-design session ends, `llm.evaluate_diagram()` scores the candidate
 
 `evaluate_session()` runs a second LLM pass after the draft score and feedback are generated: a reviewer persona checks the draft against the transcript and corrects it where the score doesn't match the written feedback, the feedback reads as generic filler, or the transcript has evidence the first pass missed. If the draft already holds up, the reviewer is instructed to leave it unchanged rather than edit for its own sake. The pass is best-effort — any failure (bad JSON, LLM error) just falls back to the original draft, so it can never turn a working evaluation into a broken one, and it's controlled by `EVAL_SELF_CRITIQUE_ENABLED` so it can be switched off without a code change if it adds latency or cost that isn't worth it.
 
+### Architecture palette: labels are what get graded
+
+Excalidraw's primitive shapes are fixed by the library, so "more shapes" isn't the lever here — labels are. A diagram is scored by serialising the board and asking the model which of the question's `expected_components` are present. The serialiser (`useInterviewSession.generateBoardDescription`) reads a shape's **bound text**, and falls back to the element type when there isn't any — so an unlabelled box serialises as the literal string `"rectangle"` and matches nothing. It contributes zero to the score no matter how well placed it is.
+
+The board now has a palette of one-click, pre-labelled components. Every label is copied verbatim from the `expected_components` vocabulary actually used across the 20 system-design questions, ordered by frequency there (load balancer 15×, cache 8×, message queue 8×, database 7×, CDN 7×, app server 6×, object storage 4×). Inserting from the palette means the diagram uses the exact names the grader looks for, instead of "LB", "postgres", or an unlabelled box. `client` is the one entry with no `expected_components` backing — nothing grades it, but nearly every design starts from one and arrows need an origin.
+
+The palette data and placement geometry live in `lib/architectureComponents.js`, deliberately free of any Excalidraw import: that is the part worth unit-testing, and pulling the editor bundle in just to check a label list would make those tests depend on a canvas renderer. A test reads the real question bank and fails if the palette drifts from the graded vocabulary, or if a rename in the bank orphans a palette entry.
+
+Placement scans for the first free grid slot in the *visible viewport* — a fixed insertion point would stack every component on the last one, and the scene origin would drop them off-screen the moment the candidate scrolls.
+
 ### System-design questions: structured tags and per-difficulty scale tiers
 
 System-design questions already carried scale numbers, but only as free text inside `constraints` (`"100M writes/day (~1,200/sec)"`). Nothing could read them, so nothing could act on them: every candidate got whatever scale the author happened to type, and difficulty was fixed at authoring time.

@@ -1,6 +1,7 @@
 import { forwardRef, useCallback, useEffect, useImperativeHandle, useRef, useState } from "react";
 import { Excalidraw } from "@excalidraw/excalidraw";
 import "@excalidraw/excalidraw/index.css";
+import ArchitecturePalette from "./ArchitecturePalette";
 
 const AUTOSAVE_DEBOUNCE_MS = 2000;
 
@@ -104,11 +105,13 @@ const SystemDesignBoard = forwardRef(function SystemDesignBoard({ initialElement
 
       <RequirementsPanel questionContext={questionContext} />
 
+      <ArchitecturePalette api={api} />
+
       <div className="flex items-center gap-4 border-b border-white/5 bg-panelLight/30 px-5 py-2.5">
         <p className="text-xs text-mute">💡 Tips:</p>
-        <p className="text-xs text-mute">Label your components clearly</p>
+        <p className="text-xs text-mute">Connect boxes with arrows to show data flow</p>
         <span className="text-white/10">·</span>
-        <p className="text-xs text-mute">Use arrows to show data flow</p>
+        <p className="text-xs text-mute">Label anything you draw yourself</p>
         <span className="text-white/10">·</span>
         <p className="text-xs text-mute">Think about scale &amp; failure points</p>
       </div>
