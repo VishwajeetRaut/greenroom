@@ -372,6 +372,7 @@ LLM_CACHE_ENABLED=true                 # Default: true
 LLM_CACHE_TTL_SECONDS=86400            # Default: 86400 (24h)
 LLM_CACHE_MAX_ENTRIES=512              # Default: 512
 LLM_OPENING_POOL_SIZE=5                # Default: 5
+LLM_METER_ENABLED=true                 # Default: true (token accounting)
 ```
 
 **Frontend:**
@@ -449,6 +450,7 @@ backend/
     harness_generator.py     # Java/C++ harness + Python/JS signature generation: dataset-first (deterministic driver, no LLM), LLM+sandbox-verify as fallback, negative-cached once exhausted
     guardrail.py             # 4-layer answer-leak prevention: prompt + regex + regeneration + fallback
     llm_cache.py             # Content-addressed TTL+LRU cache for repeated LLM calls (test-case generation, opening greeting) with measured token-saving counters
+    token_meter.py           # Provider-reported token accounting per call site, attached as a LangChain callback in _make_llm; feeds the model cost matrix
     supabase_client.py       # Singleton Supabase client using service-role key
     logger.py                # structlog JSON logger
     retry.py                 # Exponential-backoff retry decorator
@@ -608,6 +610,7 @@ analytics_events (
 | `POST` | `/api/analytics/event` | Fire-and-forget usage/click event. Persists in the background via `BackgroundTasks`; always returns 202 immediately regardless of whether the write succeeds. |
 | `GET` | `/api/analytics/stats` | Aggregated telemetry for the in-app dashboard: session counts, average scores overall/per-track, completion rates, 14-day activity, language usage, score distribution. |
 | `GET` | `/api/analytics/llm-cache` | LLM response cache counters: hits, misses, hit rate, entries, evictions, and measured prompt/completion tokens saved. Aggregate and in-process only — no prompts, responses, or per-user data; resets on restart. |
+| `GET` | `/api/analytics/llm-usage` | Provider-reported token usage broken down by call site, with computed cost. Token counts are exact; dollar figures use indicative pricing (see `token_meter.PRICING`). In-process, resets on restart. |
 
 ### Health
 

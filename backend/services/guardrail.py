@@ -26,6 +26,8 @@ import os
 import random
 import re
 
+from services import token_meter
+
 _COMPLEXITY_PATTERNS = [
     re.compile(r"O\(\s*[a-zA-Z0-9log\s\*\+\^,]+\s*\)"),
     re.compile(r"\b(time|space)\s+complexity\s+(is|would be)\s+O\(", re.IGNORECASE),
@@ -72,10 +74,17 @@ def violates(text: str, track: str) -> bool:
     return any(p.search(text) for p in patterns)
 
 
-def _chat_completion(base_url: str, api_key: str, model: str, prompt: str) -> str | None:
+def _chat_completion(
+    base_url: str, api_key: str, model: str, prompt: str, provider: str = "groq",
+) -> str | None:
     """One YES/NO-judge call against an OpenAI-compatible /chat/completions
     endpoint. Returns the upper-cased reply, or None on any failure (bad
-    status, timeout, malformed response) so callers can try the next provider."""
+    status, timeout, malformed response) so callers can try the next provider.
+
+    This judge fires on every interviewer turn, so its usage is metered even
+    though the reply is only 3 tokens — the OUTPUT is tiny but the INPUT
+    carries the whole draft response, which is what actually costs. Leaving it
+    unmetered would understate per-session cost by one full call per turn."""
     try:
         import httpx
         resp = httpx.post(
@@ -90,7 +99,9 @@ def _chat_completion(base_url: str, api_key: str, model: str, prompt: str) -> st
             timeout=5,
         )
         resp.raise_for_status()
-        return resp.json()["choices"][0]["message"]["content"].strip().upper()
+        body = resp.json()
+        token_meter.record_openai_usage("guardrail.judge", provider, body)
+        return body["choices"][0]["message"]["content"].strip().upper()
     except Exception:
         return None
 
@@ -106,6 +117,7 @@ def _yes_no_judge(prompt: str) -> bool:
         answer = _chat_completion(
             "https://api.groq.com/openai/v1", groq_key,
             os.environ.get("GROQ_MODEL", "llama-3.3-70b-versatile"), prompt,
+            provider="groq",
         )
         if answer is not None:
             return answer.startswith("YES")
@@ -116,6 +128,7 @@ def _yes_no_judge(prompt: str) -> bool:
         answer = _chat_completion(
             fallback_base, fallback_key,
             os.environ.get("FALLBACK_MODEL", "llama3.3:70b"), prompt,
+            provider="fallback",
         )
         if answer is not None:
             return answer.startswith("YES")

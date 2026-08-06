@@ -69,7 +69,7 @@ def _generate_cases_uncached(problem: str) -> list[dict] | None:
     ]
 
     try:
-        llm = _make_llm(temperature=0.1, max_tokens=600)
+        llm = _make_llm(temperature=0.1, max_tokens=600, call_site="test_runner.cases")
         result = llm.invoke([SystemMessage(content=_CASES_SYSTEM), HumanMessage(content=prompt)])
         raw = _strip_fences(result.content)
     except Exception as exc:
@@ -79,7 +79,8 @@ def _generate_cases_uncached(problem: str) -> list[dict] | None:
             # tokens on hidden "reasoning" content before writing the actual
             # reply — 600 was consistently exhausted by reasoning alone,
             # leaving empty content. 1200 was verified empirically sufficient.
-            raw = _strip_fences(_fallback_chat(msgs, max_tokens=1200, temperature=0.1))
+            raw = _strip_fences(_fallback_chat(msgs, max_tokens=1200, temperature=0.1,
+                                               call_site="test_runner.cases"))
         else:
             return None
 

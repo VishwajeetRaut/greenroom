@@ -181,20 +181,22 @@ for _c in _calls:
         return None
 
 
-def _ask_llm(system: str, user: str, temperature: float, max_tokens: int) -> str:
+def _ask_llm(system: str, user: str, temperature: float, max_tokens: int,
+             call_site: str = "question_generator") -> str:
     from langchain_core.messages import HumanMessage, SystemMessage
 
     from services.llm import _make_llm
-    llm = _make_llm(temperature=temperature, max_tokens=max_tokens)
+    llm = _make_llm(temperature=temperature, max_tokens=max_tokens, call_site=call_site)
     result = llm.invoke([SystemMessage(content=system), HumanMessage(content=user)])
     return _strip_fences(result.content)
 
 
-def _ask_llm_fallback(system: str, user: str, temperature: float, max_tokens: int) -> str:
+def _ask_llm_fallback(system: str, user: str, temperature: float, max_tokens: int,
+                      call_site: str = "question_generator") -> str:
     from services.llm import _fallback_chat
     return _strip_fences(_fallback_chat(
         [{"role": "system", "content": system}, {"role": "user", "content": user}],
-        max_tokens, temperature,
+        max_tokens, temperature, call_site=call_site,
     ))
 
 
@@ -258,10 +260,10 @@ async def select_or_generate_question(
     user_msg = "Choose now."
 
     try:
-        raw = await asyncio.to_thread(_ask_llm, system, user_msg, 1.0, 1200)
+        raw = await asyncio.to_thread(_ask_llm, system, user_msg, 1.0, 1200, "question_generator.select")
     except Exception:
         try:
-            raw = await asyncio.to_thread(_ask_llm_fallback, system, user_msg, 1.0, 1200)
+            raw = await asyncio.to_thread(_ask_llm_fallback, system, user_msg, 1.0, 1200, "question_generator.select")
         except Exception:
             return fallback_pick()
 
@@ -356,7 +358,7 @@ async def _verify_and_persist(
     agrees with the primary solution on every call."""
     try:
         system = _SECOND_SOLUTION_SYSTEM.format(function_name=function_name)
-        solution_b = await asyncio.to_thread(_ask_llm, system, prompt, 0.5, 800)
+        solution_b = await asyncio.to_thread(_ask_llm, system, prompt, 0.5, 800, "question_generator.second_solution")
     except Exception:
         return
 
