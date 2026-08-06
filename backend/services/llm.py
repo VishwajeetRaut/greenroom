@@ -25,6 +25,7 @@ from langchain_openai import AzureChatOpenAI
 from pydantic import BaseModel, Field
 
 from services import guardrail, jd_analyzer, llm_cache, question_bank, token_meter
+from services import transcript as transcript_builder
 from services.logger import log
 
 # ── env ──────────────────────────────────────────────────────────────────────
@@ -582,6 +583,183 @@ def _validate_eval_result(result: dict) -> dict:
     validated = EvaluationResult(**result)
     return validated.model_dump()
 
+def _default_evaluation() -> dict:
+    return {
+        "overall_score": 5,
+        "summary": "Could not generate a detailed report this time. Your transcript has been saved.",
+        "star_analysis": {
+            "situation": "—", "task": "—", "action": "—", "result": "—",
+            "star_score": 0, "missing_elements": [],
+        },
+        "evaluations": [],
+    }
+
+
+def _parse_eval_json(raw: str) -> dict | None:
+    """Some providers wrap JSON in markdown fences even with
+    response_format=json_object set — strip before parsing."""
+    cleaned = re.sub(r"^```[a-z]*\n?", "", raw.strip())
+    cleaned = re.sub(r"\n?```$", "", cleaned).strip()
+    try:
+        return json.loads(cleaned)
+    except json.JSONDecodeError:
+        return None
+
+
+def _evaluate_transcript(track: str, role: str, transcript: str, system_content: str) -> dict | None:
+    """One evaluation call, Groq with an Ollama fallback. Returns None if both
+    providers fail — never raises.
+
+    The fallback used to sit outside the inner try, so if it also failed (a
+    network error, or the same 429 the primary hit) the exception escaped
+    evaluate_session entirely and POST /interview/end returned a 500. A
+    candidate who had just finished a two-hour interview got nothing at all,
+    which is the single worst outcome this function can produce.
+    """
+    lc_messages = [
+        SystemMessage(content=system_content),
+        HumanMessage(content=transcript or "The candidate did not answer any questions."),
+    ]
+    parser = JsonOutputParser(pydantic_object=EvaluationResult)
+
+    try:
+        # Azure OpenAI, not Groq: evaluation moved there upstream. The map-reduce
+        # reduce step goes through this same helper, so both paths get the
+        # provider, the guarded fallback and the validation below.
+        llm = _make_azure_llm(temperature=0.3, max_tokens=700, call_site="evaluate_session")
+        result = llm.bind(response_format={"type": "json_object"}) | parser
+        result = result.invoke(lc_messages)
+        result = result.model_dump() if hasattr(result, "model_dump") else result
+        # JsonOutputParser only uses the pydantic_object for format
+        # instructions, not enforcement, so malformed JSON would otherwise
+        # persist as a null score rather than triggering the fallback.
+        return _validate_eval_result(result)
+    except Exception as exc:
+        status = getattr(exc, "status_code", None)
+        retryable = status is None or status == 429 or (isinstance(status, int) and status >= 500)
+        log.warning("llm.evaluate_session.primary_failed", error=str(exc)[:300], retryable=retryable)
+        if not retryable:
+            return None
+
+    try:
+        raw = _fallback_chat(
+            [
+                {"role": "system", "content": system_content},
+                {"role": "user", "content": transcript or "The candidate did not answer any questions."},
+            ],
+            max_tokens=700, temperature=0.3, json_mode=True, call_site="evaluate_session",
+        )
+    except Exception as exc:
+        log.warning("llm.evaluate_session.fallback_failed", error=str(exc)[:300])
+        return None
+
+    parsed = _parse_eval_json(raw)
+    if parsed is None:
+        return None
+    try:
+        return _validate_eval_result(parsed)
+    except Exception as exc:
+        # A structurally wrong report is a failure, not something to persist.
+        log.warning("llm.evaluate_session.fallback_invalid", error=str(exc)[:200])
+        return None
+
+
+_CHUNK_SYSTEM_PROMPT = """\
+You are an interview coach reading ONE SEGMENT of a longer {track} interview \
+transcript for a {role} role. This is segment {index} of {total}.
+
+Do not score anything yet — you cannot see the whole interview. Just record \
+what this segment shows, grounded in what the candidate actually said.
+
+Reply ONLY as valid JSON, no markdown fences:
+{{
+  "strengths": ["<specific thing the candidate did well, with evidence>", ...],
+  "weaknesses": ["<specific gap or vague answer, with evidence>", ...],
+  "notable_quotes": ["<short quote or paraphrase that a final report should draw on>", ...],
+  "topics_covered": ["<topic>", ...]
+}}"""
+
+_REDUCE_SYSTEM_PROMPT = """\
+You are an expert interview coach writing the final report for a mock {track} \
+interview for a {role} role.
+
+The transcript was too long to read in one pass, so it was split into segments \
+and each was analysed separately. Below are those per-segment notes, in order. \
+Write ONE coherent evaluation of the WHOLE interview from them — do not \
+evaluate the segments individually, and do not mention that the transcript was \
+split.
+
+Your job:
+1. Score the candidate on clarity, structure, and confidence (1-10 each). For technical/system-design tracks also score "technical depth".
+2. Perform a STAR-framework analysis (behavioral tracks) or solution-quality analysis (technical/system-design). Score STAR completeness 0-10 and list any missing elements.
+3. Write a 2-3 sentence overall summary. End with the single most actionable improvement.
+
+Reply ONLY as valid JSON matching this exact schema — no markdown fences, no extra keys:
+{{
+  "overall_score": <int 0-10>,
+  "summary": "<string>",
+  "star_analysis": {{
+    "situation": "<string>",
+    "task": "<string>",
+    "action": "<string>",
+    "result": "<string>",
+    "star_score": <int 0-10>,
+    "missing_elements": ["<string>", ...]
+  }},
+  "evaluations": [
+    {{"category": "<string>", "score": <int 0-10>, "feedback": "<string>"}},
+    ...
+  ]
+}}"""
+
+
+def _evaluate_chunked(track: str, role: str, history: list[dict]) -> dict | None:
+    """Map-reduce evaluation for a transcript that can't fit in one call.
+
+    Map: each segment produces structured notes (strengths, weaknesses,
+    evidence) rather than a score — a segment can't be scored on its own
+    without the rest of the interview for context, and averaging per-segment
+    scores would flatten exactly the arc an interview is meant to show.
+
+    Reduce: one final call turns the notes into the same EvaluationResult the
+    single-pass path returns, so nothing downstream needs to know which path
+    ran.
+    """
+    segments = transcript_builder.chunks(history)
+    if not segments:
+        return None
+
+    log.info("llm.evaluate_session.chunked", track=track, segments=len(segments))
+    notes: list[str] = []
+    for index, segment in enumerate(segments, start=1):
+        system = _CHUNK_SYSTEM_PROMPT.format(track=track, role=role, index=index, total=len(segments))
+        try:
+            # Azure, like the reduce step below — one evaluation should not be
+            # half-written by Groq and half by gpt-5-mini.
+            llm = _make_azure_llm(temperature=0.2, max_tokens=600, call_site="evaluate_session.chunk")
+            raw = llm.bind(response_format={"type": "json_object"}).invoke([
+                SystemMessage(content=system),
+                HumanMessage(content=segment),
+            ]).content
+        except Exception as exc:
+            # One unreadable segment must not sink the report — the remaining
+            # segments still describe most of the interview.
+            log.warning("llm.evaluate_session.chunk_failed", index=index, error=str(exc)[:200])
+            continue
+        parsed = _parse_eval_json(raw)
+        if parsed:
+            notes.append(f"Segment {index} of {len(segments)}:\n{json.dumps(parsed)}")
+
+    if not notes:
+        return None
+
+    reduced = _evaluate_transcript(
+        track, role,
+        "\n\n".join(notes),
+        _REDUCE_SYSTEM_PROMPT.format(track=track, role=role),
+    )
+    return reduced
+
 
 def evaluate_session(track: str, role: str, history: list[dict]) -> dict:
     """
@@ -590,78 +768,36 @@ def evaluate_session(track: str, role: str, history: list[dict]) -> dict:
       | ChatGroq (json_mode)
       | JsonOutputParser(EvaluationResult)
     Falls back to Ollama-cloud on Groq rate-limit / server error.
+
+    A transcript too large for one call is compacted (superseded code and
+    diagram revisions dropped) and, if still too large, evaluated map-reduce
+    style over segments — see services.transcript for why that matters. This
+    function never raises: every failure path degrades to a default report,
+    because losing the evaluation is the worst outcome for a candidate who has
+    just finished a whole interview.
     """
-    transcript = "\n".join(
-        f"{'Interviewer' if t['role'] == 'interviewer' else 'Candidate'}: {t['content']}"
-        for t in history
+    transcript, fits = transcript_builder.build(history)
+
+    if not fits:
+        result = _evaluate_chunked(track, role, history)
+        if result:
+            _reconcile_score(result)
+            return _self_critique(track, role, transcript, result)
+        # Chunking failed too — fall through and try the compacted transcript
+        # once, on the chance the budget was merely conservative.
+
+    # The eval prompt contains literal JSON braces, which LangChain's template
+    # parser would misinterpret as variables — hence messages built directly
+    # inside _evaluate_transcript rather than a ChatPromptTemplate.
+    result = _evaluate_transcript(
+        track, role, transcript, EVAL_SYSTEM_PROMPT.format(track=track, role=role),
     )
+    if not result:
+        log.warning("llm.evaluate_session.defaulted", track=track)
+        return _default_evaluation()
 
-    system_content = EVAL_SYSTEM_PROMPT.format(track=track, role=role)
-
-    # Build messages directly — the eval prompt contains literal JSON braces
-    # which LangChain's template parser would misinterpret as variables.
-    lc_messages = [
-        SystemMessage(content=system_content),
-        HumanMessage(content=transcript or "The candidate did not answer any questions."),
-    ]
-
-    parser = JsonOutputParser(pydantic_object=EvaluationResult)
-
-    try:
-        llm = _make_azure_llm(temperature=0.3, max_tokens=700, call_site="evaluate_session")
-        llm_json = llm.bind(response_format={"type": "json_object"})
-        chain = llm_json | parser
-        result = chain.invoke(lc_messages)
-        # Pydantic model → plain dict for the rest of the app
-        if hasattr(result, "model_dump"):
-            result = result.model_dump()
-        _reconcile_score(result)
-        result = _validate_eval_result(result)
-        return _self_critique(track, role, transcript, result)
-    except Exception as exc:
-        status = getattr(exc, "status_code", None)
-        if status is None or status == 429 or (isinstance(status, int) and status >= 500):
-            # _fallback_chat must stay inside this try. It raises on an
-            # unconfigured fallback, a timeout, a 5xx via raise_for_status, or
-            # an unexpected response shape — and from outside the try any of
-            # those escape past the last-resort default below, turning a Groq
-            # failure into a 500 at the end of a candidate's session.
-            #
-            # This path only runs when the primary is already failing, and an
-            # outage or a load burst tends to hit both providers at once, so
-            # the fallback failing is correlated with the thing that summoned it.
-            try:
-                raw = _fallback_chat(
-                    [
-                        {"role": "system", "content": system_content},
-                        {"role": "user",   "content": transcript or "The candidate did not answer any questions."},
-                    ],
-                    max_tokens=700, temperature=0.3, json_mode=True, call_site="evaluate_session",
-                )
-                # Some fallback providers wrap JSON in markdown fences even
-                # with response_format=json_object set — strip before parsing.
-                cleaned = re.sub(r"^```[a-z]*\n?", "", raw.strip())
-                cleaned = re.sub(r"\n?```$", "", cleaned).strip()
-                result = json.loads(cleaned)
-                _reconcile_score(result)
-                result = _validate_eval_result(result)
-                return _self_critique(track, role, transcript, result)
-            except Exception as fallback_exc:
-                log.warning(
-                    "llm.evaluate_session.fallback_failed",
-                    track=track, error=str(fallback_exc),
-                )
-        # Last-resort default
-        log.warning("llm.evaluate_session.default_report", track=track, error=str(exc))
-        return {
-            "overall_score": 5,
-            "summary": "Could not generate a detailed report this time. Your transcript has been saved.",
-            "star_analysis": {
-                "situation": "—", "task": "—", "action": "—", "result": "—",
-                "star_score": 0, "missing_elements": [],
-            },
-            "evaluations": [],
-        }
+    _reconcile_score(result)
+    return _self_critique(track, role, transcript, result)
 
 
 def _extract_diagram_descriptions(history: list[dict]) -> str:

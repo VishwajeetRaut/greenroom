@@ -212,6 +212,26 @@ When a system-design session ends, `llm.evaluate_diagram()` scores the candidate
 
 `GET /api/tts/speak` previously regenerated audio via `edge-tts` from scratch on every call, even for text already synthesized moments earlier — a candidate replaying the interviewer's question, or navigating back to one already asked, paid the full latency and (conceptually) cost again. `services/tts.py` now caches on disk, keyed by `sha256(voice:text)`, with atomic writes (temp file + rename) and LRU eviction once the cache exceeds a bounded entry count.
 
+### Evaluating a long session without blowing the token budget
+
+Every candidate turn appends the candidate's *entire current code* to the history (`candidate_content += f"\n\n[Candidate's current code]\n{req.code}"`). `code` is capped at 100,000 characters and `message` at 20,000, across up to 15 candidate turns — so a transcript can reach ~1.8M characters, most of it duplicated copies of earlier revisions of one program. System-design sessions do the same with the serialised `[Architecture diagram]` block.
+
+Measured, not theorised: a 15-turn session carrying an ~8KB file produced a 128,000-character transcript that Groq billed at **55,467 tokens — 55% of the free tier's entire 100,000-token daily allowance, in a single call.** It returned 429. (Worth noting: code tokenises at roughly **2.3 characters per token**, not the ~4 that prose does, so a chars/4 estimate understates a code-heavy transcript by about 70%. `transcript.estimate_tokens` is deliberately pessimistic for that reason.)
+
+`services/transcript.py` applies three stages, only as far as needed, so a session that already worked is completely unaffected:
+
+1. **Under budget** → send verbatim. Byte-identical to the previous behaviour.
+2. **Over budget** → drop superseded code and diagram blocks, keeping the final version of each in full. The placeholder is left in place rather than deleted, so the evaluator can still see the candidate was iterating and roughly how much they wrote.
+3. **Still over** → chunk on turn boundaries and evaluate map-reduce style.
+
+In the map stage each segment produces structured *notes* (strengths, weaknesses, evidence) rather than a score: a segment can't be scored without the rest of the interview for context, and averaging per-segment scores would flatten exactly the arc an interview is meant to show. One reduce call turns the notes into the same `EvaluationResult` the single-pass path returns, so nothing downstream knows which path ran. A segment that fails is skipped rather than sinking the report.
+
+On the measured case this took the evaluation from a 429 to **6,546 input tokens** — a ~90% reduction, and 6.5% of the daily allowance instead of 55%.
+
+#### The failure this also fixed
+
+`_fallback_chat` sat *outside* the inner `try` in `evaluate_session`. So when Groq 429'd on an oversized transcript and the fallback provider also failed, the exception escaped the function entirely and `POST /interview/end` returned a 500 — **a candidate who had just finished a two-hour interview got nothing at all.** `evaluate_session` now never raises: every failure path degrades to the default report, because losing the evaluation is the worst outcome this function can produce.
+
 ### Self-critique pass on the evaluation chain
 
 `evaluate_session()` runs a second LLM pass after the draft score and feedback are generated: a reviewer persona checks the draft against the transcript and corrects it where the score doesn't match the written feedback, the feedback reads as generic filler, or the transcript has evidence the first pass missed. If the draft already holds up, the reviewer is instructed to leave it unchanged rather than edit for its own sake. The pass is best-effort — any failure (bad JSON, LLM error) just falls back to the original draft, so it can never turn a working evaluation into a broken one, and it's controlled by `EVAL_SELF_CRITIQUE_ENABLED` so it can be switched off without a code change if it adds latency or cost that isn't worth it.
@@ -403,6 +423,7 @@ MAX_ACTIVE_SESSIONS=3                  # Default: 3
 SESSION_IDLE_TIMEOUT_MINUTES=30        # Default: 30
 MAX_CANDIDATE_TURNS=15                 # Default: 15
 MAX_SESSION_DURATION_MINUTES=120       # Default: 120 (wall-clock cap)
+EVAL_MAX_TRANSCRIPT_TOKENS=12000       # Default: 12000 (transcript budget)
 EVAL_SELF_CRITIQUE_ENABLED=true        # Default: true
 
 # Azure OpenAI — end-of-session evaluation report only (evaluate_session,
