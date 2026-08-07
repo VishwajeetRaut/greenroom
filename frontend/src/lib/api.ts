@@ -39,6 +39,10 @@ export interface QuestionContext {
   constraints: string[];
   examples: Record<string, unknown>[];
   is_stdio: boolean;
+  // System-design only — empty for the other tracks.
+  tags?: string[];
+  core_challenge?: string | null;
+  scale?: string[];
 }
 
 export interface SendMessageResponse { question: string; done?: boolean; question_context?: QuestionContext }

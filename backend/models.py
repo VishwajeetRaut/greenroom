@@ -74,6 +74,10 @@ class QuestionContext(BaseModel):
     constraints: List[str]
     examples: List[dict]
     is_stdio: bool
+    # System-design only; empty/None for the other tracks.
+    tags: List[str] = []
+    core_challenge: Optional[str] = None
+    scale: List[str] = []
 
 
 class MessageResponse(BaseModel):

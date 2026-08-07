@@ -56,8 +56,8 @@ package "Azure Container Apps  ·  Private VNet  ·  OIDC CI/CD" #F2FAF3 {
 
   package "Backend API  ·  FastAPI  ·  2 replicas" #DDF3E2 {
     component "Frontend\nReact + Vite + Nginx" as frontend #D7E9FA
-    component "Auth Guard\nJWT + dual ownership check" as authguard
-    component "Session Guard\nrate · cap (3) · idle 30 min -> 410" as sessionguard
+    component "Auth Guard\nvalidates the JWT" as authguard
+    component "Session Guard\nownership · rate · cap (3)\nidle 30 min -> 410" as sessionguard
     component "Session Cache\nasyncio.Lock per session\n⚠ in-memory: per-replica only" as sessioncache
 
     together {
@@ -126,7 +126,7 @@ guardrail -up-> llmorchestrator : regenerate on leak
 
 llmorchestrator -right-> groq : ⑤ primary call
 evalengine -right-> azureopenai : ⑤ eval-only call
-groq -down-> ollama : fallback
+llmorchestrator -down-> ollama : on 429 / 5xx
 
 ttsservice -right-> edgetts : synthesize
 
