@@ -24,7 +24,8 @@ from langchain_groq import ChatGroq
 from langchain_openai import AzureChatOpenAI
 from pydantic import BaseModel, Field
 
-from services import guardrail
+from services import guardrail, jd_analyzer, llm_cache, metrics, question_bank, token_meter
+from services import transcript as transcript_builder
 from services.logger import log
 
 # ── env ──────────────────────────────────────────────────────────────────────
@@ -46,6 +47,10 @@ AZURE_OPENAI_API_KEY    = os.environ.get("AZURE_OPENAI_API_KEY", "")
 AZURE_OPENAI_ENDPOINT   = os.environ.get("AZURE_OPENAI_ENDPOINT", "")
 AZURE_OPENAI_DEPLOYMENT = os.environ.get("AZURE_OPENAI_DEPLOYMENT", "gpt-5-mini")
 AZURE_OPENAI_API_VERSION = os.environ.get("AZURE_OPENAI_API_VERSION", "2024-12-01-preview")
+
+# How many distinct opening greetings to keep per (track, role) before serving
+# them from cache instead of generating a new one. See opening_message.
+OPENING_POOL_SIZE = int(os.environ.get("LLM_OPENING_POOL_SIZE", "5"))
 
 
 # ── Pydantic schemas for structured evaluation output ────────────────────────
@@ -72,18 +77,38 @@ class EvaluationResult(BaseModel):
 
 # ── LangChain LLM (with Groq) ────────────────────────────────────────────────
 
-def _make_llm(temperature: float = 0.7, max_tokens: int = 300) -> ChatGroq:
+def _make_llm(
+    temperature: float = 0.7, max_tokens: int = 300,
+    call_site: str = "unattributed", model: str | None = None,
+) -> ChatGroq:
+    """Single construction point for every Groq call.
+
+    call_site is what makes token accounting useful — the interesting question
+    isn't total spend but which part of a session is expensive, so usage is
+    tagged here rather than aggregated anonymously. The recorder is attached
+    as a callback (not read off the return value) because several call sites
+    are LCEL chains ending in an output parser, which discards the AIMessage
+    carrying the usage metadata before the caller ever sees it.
+
+    model overrides GROQ_MODEL for a single call — used by
+    scripts/benchmark_models.py to run the same workload across models.
+    """
     if not GROQ_API_KEY:
         raise RuntimeError("GROQ_API_KEY is not set.")
+    resolved = model or GROQ_MODEL
     return ChatGroq(
         api_key=GROQ_API_KEY,
-        model=GROQ_MODEL,
+        model=resolved,
         temperature=temperature,
         max_tokens=max_tokens,
+        callbacks=[token_meter.UsageRecorder(call_site, provider="groq", model=resolved)],
     )
 
 
-def _make_azure_llm(temperature: float = 0.7, max_tokens: int = 300) -> AzureChatOpenAI:
+def _make_azure_llm(
+    temperature: float = 0.7, max_tokens: int = 300,
+    call_site: str = "unattributed",
+) -> AzureChatOpenAI:
     """Evaluation-only LLM (Azure OpenAI gpt-5-mini). Used by evaluate_session,
     _self_critique, and evaluate_diagram — nowhere else.
 
@@ -105,12 +130,27 @@ def _make_azure_llm(temperature: float = 0.7, max_tokens: int = 300) -> AzureCha
         api_version=AZURE_OPENAI_API_VERSION,
         max_completion_tokens=max_tokens,
         reasoning_effort="minimal",
+        # Same recorder as _make_llm. Evaluation moved to Azure after this
+        # metering was written, and _make_azure_llm is a separate constructor —
+        # so without this line the whole evaluation path (evaluate_session,
+        # _self_critique, evaluate_diagram) records nothing, which is exactly
+        # the blind spot this module exists to remove. gpt-5-mini has no entry
+        # in token_meter.PRICING, so it reports exact token counts and shows up
+        # under `unpriced_models` rather than silently costing $0.
+        callbacks=[token_meter.UsageRecorder(
+            call_site, provider="azure", model=AZURE_OPENAI_DEPLOYMENT,
+        )],
     )
 
 
 # ── Fallback: Ollama-cloud (OpenAI-compatible REST) ──────────────────────────
 
-def _fallback_chat(messages: list[dict], max_tokens: int, temperature: float, json_mode: bool = False) -> str:
+def _fallback_chat(
+    messages: list[dict], max_tokens: int, temperature: float, json_mode: bool = False,
+    call_site: str = "unattributed",
+) -> str:
+    """This path never touches LangChain, so the callback in _make_llm can't
+    see it — usage is recorded directly off the OpenAI-compatible response."""
     if not FALLBACK_BASE_URL or not FALLBACK_API_KEY:
         raise RuntimeError("Fallback LLM not configured (FALLBACK_BASE_URL / FALLBACK_API_KEY missing).")
     payload: dict = {
@@ -129,7 +169,9 @@ def _fallback_chat(messages: list[dict], max_tokens: int, temperature: float, js
         follow_redirects=True,
     )
     resp.raise_for_status()
-    return resp.json()["choices"][0]["message"]["content"].strip()
+    body = resp.json()
+    token_meter.record_openai_usage(call_site, "fallback", body)
+    return body["choices"][0]["message"]["content"].strip()
 
 
 # ── Track personas ────────────────────────────────────────────────────────────
@@ -293,12 +335,31 @@ def _history_to_lc(history: list[dict]) -> list:
 # ── Public API ────────────────────────────────────────────────────────────────
 
 def opening_message(track: str, role: str) -> str:
-    """LLM-generated warm greeting that opens the interview session."""
+    """LLM-generated warm greeting that opens the interview session.
+
+    Cached as a variant POOL rather than a single response: the inputs
+    (track, role) take only a handful of distinct values across the whole
+    product, so without caching every session start pays for a greeting that
+    is near-identical to one already generated. Collapsing it to one cached
+    string would make every candidate hear the exact same sentence forever,
+    so the first OPENING_POOL_SIZE sessions per (track, role) generate and
+    fill the pool, and every session after that is served free from it.
+    """
+    return llm_cache.pooled_call(
+        "llm.opening",
+        (track, role, GROQ_MODEL),
+        lambda: _opening_message_uncached(track, role),
+        pool_size=OPENING_POOL_SIZE,
+        prompt_chars=len(OPENING_SYSTEM_PROMPT.format(track=track, role=role)),
+    )
+
+
+def _opening_message_uncached(track: str, role: str) -> str:
     import time
     system = OPENING_SYSTEM_PROMPT.format(track=track, role=role)
     start = time.monotonic()
     try:
-        llm_client = _make_llm(temperature=0.9, max_tokens=120)
+        llm_client = _make_llm(temperature=0.9, max_tokens=120, call_site="opening_message")
         result = llm_client.invoke([
             SystemMessage(content=system),
             HumanMessage(content="[The interview session is starting now.]"),
@@ -314,7 +375,7 @@ def opening_message(track: str, role: str) -> str:
                     {"role": "system", "content": system},
                     {"role": "user",   "content": "[The interview session is starting now.]"},
                 ],
-                max_tokens=120, temperature=0.9,
+                max_tokens=120, temperature=0.9, call_site="opening_message",
             )
             log.info("llm.opening", track=track, latency_ms=round((time.monotonic() - start) * 1000), provider="fallback")
             return result
@@ -323,7 +384,7 @@ def opening_message(track: str, role: str) -> str:
 
 def next_question(
     track: str, role: str, history: list[dict], assigned_question: dict | None = None,
-    job_description: str | None = None, is_new_assignment: bool = False,
+    jd_profile: dict | None = None, is_new_assignment: bool = False,
 ) -> str:
     """
     LangChain LCEL interview chain:
@@ -347,8 +408,12 @@ def next_question(
     later test-runner can grade against verified canonical test cases.
     """
     system_prompt = TRACK_PERSONAS.get(track, TRACK_PERSONAS["behavioral"]).format(role=role)
-    if job_description:
-        system_prompt += f"\n\n[Job description the candidate is interviewing for]\n{job_description.strip()}"
+    # A compact structured profile, not the raw paste. The system prompt is
+    # re-sent on EVERY turn, so a 5000-char job description was being paid for
+    # once per turn — and the per-turn call is already 61% of session cost
+    # (docs/MODEL_COST_MATRIX.md). The profile carries the parts that actually
+    # steer the interview in a few hundred characters.
+    system_prompt += jd_analyzer.prompt_fragment(jd_profile)
     if track == "behavioral" and assigned_question:
         expected = assigned_question.get("expected_elements") or []
         elements_note = (
@@ -367,6 +432,24 @@ def next_question(
             "Keep probing the candidate's design choices, component selection, trade-offs, "
             "and how they would handle scale and failure."
         )
+        # Concrete numbers, so "how would you handle scale?" becomes "how does
+        # this hold at 2B writes/day?". Without these the interviewer probes
+        # scale in the abstract, which is the vaguest part of a system-design
+        # session and the easiest for a candidate to hand-wave through.
+        scale_lines = question_bank.format_scale(
+            question_bank.scale_for(assigned_question, assigned_question.get("scale_tier"))
+        )
+        if scale_lines:
+            system_prompt += (
+                "\n\nHold the candidate to THESE numbers — state them when you introduce the "
+                "problem, and refer back to them when probing scale:\n"
+                + "\n".join(f"- {line}" for line in scale_lines)
+            )
+        if assigned_question.get("core_challenge"):
+            system_prompt += (
+                f"\n\nThe crux of this problem is: {assigned_question['core_challenge']} "
+                "Make sure the candidate confronts it — but never hand them the answer."
+            )
     if track == "technical" and assigned_question:
         is_stdio = bool(assigned_question.get("tests") and "stdin" in assigned_question["tests"][0])
         if is_stdio:
@@ -409,7 +492,7 @@ def next_question(
                 MessagesPlaceholder(variable_name="history"),
                 ("human", "{input}"),
             ])
-            chain = p | _make_llm(temperature=temperature, max_tokens=200) | StrOutputParser()
+            chain = p | _make_llm(temperature=temperature, max_tokens=200, call_site="next_question") | StrOutputParser()
             return chain.invoke({"history": lc_history, "input": last_turn})
         except Exception as exc:
             status = getattr(exc, "status_code", None)
@@ -418,7 +501,7 @@ def next_question(
                 for m in lc_history:
                     raw_msgs.append({"role": "assistant" if isinstance(m, AIMessage) else "user", "content": m.content})
                 raw_msgs.append({"role": "user", "content": last_turn})
-                return _fallback_chat(raw_msgs, max_tokens=200, temperature=temperature)
+                return _fallback_chat(raw_msgs, max_tokens=200, temperature=temperature, call_site="next_question")
             raise
 
     import time as _time
@@ -471,7 +554,7 @@ def _self_critique(track: str, role: str, transcript: str, draft: dict) -> dict:
             f"Transcript:\n{transcript or 'The candidate did not answer any questions.'}\n\n"
             f"Draft evaluation to review:\n{json.dumps(draft)}"
         )
-        llm = _make_azure_llm(temperature=0.2, max_tokens=700)
+        llm = _make_azure_llm(temperature=0.2, max_tokens=700, call_site="evaluate_session.self_critique")
         llm_json = llm.bind(response_format={"type": "json_object"})
         parser = JsonOutputParser(pydantic_object=EvaluationResult)
         chain = llm_json | parser
@@ -500,6 +583,183 @@ def _validate_eval_result(result: dict) -> dict:
     validated = EvaluationResult(**result)
     return validated.model_dump()
 
+def _default_evaluation() -> dict:
+    return {
+        "overall_score": 5,
+        "summary": "Could not generate a detailed report this time. Your transcript has been saved.",
+        "star_analysis": {
+            "situation": "—", "task": "—", "action": "—", "result": "—",
+            "star_score": 0, "missing_elements": [],
+        },
+        "evaluations": [],
+    }
+
+
+def _parse_eval_json(raw: str) -> dict | None:
+    """Some providers wrap JSON in markdown fences even with
+    response_format=json_object set — strip before parsing."""
+    cleaned = re.sub(r"^```[a-z]*\n?", "", raw.strip())
+    cleaned = re.sub(r"\n?```$", "", cleaned).strip()
+    try:
+        return json.loads(cleaned)
+    except json.JSONDecodeError:
+        return None
+
+
+def _evaluate_transcript(track: str, role: str, transcript: str, system_content: str) -> dict | None:
+    """One evaluation call, Groq with an Ollama fallback. Returns None if both
+    providers fail — never raises.
+
+    The fallback used to sit outside the inner try, so if it also failed (a
+    network error, or the same 429 the primary hit) the exception escaped
+    evaluate_session entirely and POST /interview/end returned a 500. A
+    candidate who had just finished a two-hour interview got nothing at all,
+    which is the single worst outcome this function can produce.
+    """
+    lc_messages = [
+        SystemMessage(content=system_content),
+        HumanMessage(content=transcript or "The candidate did not answer any questions."),
+    ]
+    parser = JsonOutputParser(pydantic_object=EvaluationResult)
+
+    try:
+        # Azure OpenAI, not Groq: evaluation moved there upstream. The map-reduce
+        # reduce step goes through this same helper, so both paths get the
+        # provider, the guarded fallback and the validation below.
+        llm = _make_azure_llm(temperature=0.3, max_tokens=700, call_site="evaluate_session")
+        result = llm.bind(response_format={"type": "json_object"}) | parser
+        result = result.invoke(lc_messages)
+        result = result.model_dump() if hasattr(result, "model_dump") else result
+        # JsonOutputParser only uses the pydantic_object for format
+        # instructions, not enforcement, so malformed JSON would otherwise
+        # persist as a null score rather than triggering the fallback.
+        return _validate_eval_result(result)
+    except Exception as exc:
+        status = getattr(exc, "status_code", None)
+        retryable = status is None or status == 429 or (isinstance(status, int) and status >= 500)
+        log.warning("llm.evaluate_session.primary_failed", error=str(exc)[:300], retryable=retryable)
+        if not retryable:
+            return None
+
+    try:
+        raw = _fallback_chat(
+            [
+                {"role": "system", "content": system_content},
+                {"role": "user", "content": transcript or "The candidate did not answer any questions."},
+            ],
+            max_tokens=700, temperature=0.3, json_mode=True, call_site="evaluate_session",
+        )
+    except Exception as exc:
+        log.warning("llm.evaluate_session.fallback_failed", error=str(exc)[:300])
+        return None
+
+    parsed = _parse_eval_json(raw)
+    if parsed is None:
+        return None
+    try:
+        return _validate_eval_result(parsed)
+    except Exception as exc:
+        # A structurally wrong report is a failure, not something to persist.
+        log.warning("llm.evaluate_session.fallback_invalid", error=str(exc)[:200])
+        return None
+
+
+_CHUNK_SYSTEM_PROMPT = """\
+You are an interview coach reading ONE SEGMENT of a longer {track} interview \
+transcript for a {role} role. This is segment {index} of {total}.
+
+Do not score anything yet — you cannot see the whole interview. Just record \
+what this segment shows, grounded in what the candidate actually said.
+
+Reply ONLY as valid JSON, no markdown fences:
+{{
+  "strengths": ["<specific thing the candidate did well, with evidence>", ...],
+  "weaknesses": ["<specific gap or vague answer, with evidence>", ...],
+  "notable_quotes": ["<short quote or paraphrase that a final report should draw on>", ...],
+  "topics_covered": ["<topic>", ...]
+}}"""
+
+_REDUCE_SYSTEM_PROMPT = """\
+You are an expert interview coach writing the final report for a mock {track} \
+interview for a {role} role.
+
+The transcript was too long to read in one pass, so it was split into segments \
+and each was analysed separately. Below are those per-segment notes, in order. \
+Write ONE coherent evaluation of the WHOLE interview from them — do not \
+evaluate the segments individually, and do not mention that the transcript was \
+split.
+
+Your job:
+1. Score the candidate on clarity, structure, and confidence (1-10 each). For technical/system-design tracks also score "technical depth".
+2. Perform a STAR-framework analysis (behavioral tracks) or solution-quality analysis (technical/system-design). Score STAR completeness 0-10 and list any missing elements.
+3. Write a 2-3 sentence overall summary. End with the single most actionable improvement.
+
+Reply ONLY as valid JSON matching this exact schema — no markdown fences, no extra keys:
+{{
+  "overall_score": <int 0-10>,
+  "summary": "<string>",
+  "star_analysis": {{
+    "situation": "<string>",
+    "task": "<string>",
+    "action": "<string>",
+    "result": "<string>",
+    "star_score": <int 0-10>,
+    "missing_elements": ["<string>", ...]
+  }},
+  "evaluations": [
+    {{"category": "<string>", "score": <int 0-10>, "feedback": "<string>"}},
+    ...
+  ]
+}}"""
+
+
+def _evaluate_chunked(track: str, role: str, history: list[dict]) -> dict | None:
+    """Map-reduce evaluation for a transcript that can't fit in one call.
+
+    Map: each segment produces structured notes (strengths, weaknesses,
+    evidence) rather than a score — a segment can't be scored on its own
+    without the rest of the interview for context, and averaging per-segment
+    scores would flatten exactly the arc an interview is meant to show.
+
+    Reduce: one final call turns the notes into the same EvaluationResult the
+    single-pass path returns, so nothing downstream needs to know which path
+    ran.
+    """
+    segments = transcript_builder.chunks(history)
+    if not segments:
+        return None
+
+    log.info("llm.evaluate_session.chunked", track=track, segments=len(segments))
+    notes: list[str] = []
+    for index, segment in enumerate(segments, start=1):
+        system = _CHUNK_SYSTEM_PROMPT.format(track=track, role=role, index=index, total=len(segments))
+        try:
+            # Azure, like the reduce step below — one evaluation should not be
+            # half-written by Groq and half by gpt-5-mini.
+            llm = _make_azure_llm(temperature=0.2, max_tokens=600, call_site="evaluate_session.chunk")
+            raw = llm.bind(response_format={"type": "json_object"}).invoke([
+                SystemMessage(content=system),
+                HumanMessage(content=segment),
+            ]).content
+        except Exception as exc:
+            # One unreadable segment must not sink the report — the remaining
+            # segments still describe most of the interview.
+            log.warning("llm.evaluate_session.chunk_failed", index=index, error=str(exc)[:200])
+            continue
+        parsed = _parse_eval_json(raw)
+        if parsed:
+            notes.append(f"Segment {index} of {len(segments)}:\n{json.dumps(parsed)}")
+
+    if not notes:
+        return None
+
+    reduced = _evaluate_transcript(
+        track, role,
+        "\n\n".join(notes),
+        _REDUCE_SYSTEM_PROMPT.format(track=track, role=role),
+    )
+    return reduced
+
 
 def evaluate_session(track: str, role: str, history: list[dict]) -> dict:
     """
@@ -508,65 +768,42 @@ def evaluate_session(track: str, role: str, history: list[dict]) -> dict:
       | ChatGroq (json_mode)
       | JsonOutputParser(EvaluationResult)
     Falls back to Ollama-cloud on Groq rate-limit / server error.
+
+    A transcript too large for one call is compacted (superseded code and
+    diagram revisions dropped) and, if still too large, evaluated map-reduce
+    style over segments — see services.transcript for why that matters. This
+    function never raises: every failure path degrades to a default report,
+    because losing the evaluation is the worst outcome for a candidate who has
+    just finished a whole interview.
     """
-    transcript = "\n".join(
-        f"{'Interviewer' if t['role'] == 'interviewer' else 'Candidate'}: {t['content']}"
-        for t in history
+    transcript, fits = transcript_builder.build(history)
+
+    if not fits:
+        result = _evaluate_chunked(track, role, history)
+        if result:
+            metrics.record_evaluation(track, "chunked")
+            _reconcile_score(result)
+            return _self_critique(track, role, transcript, result)
+        # Chunking failed too — fall through and try the compacted transcript
+        # once, on the chance the budget was merely conservative.
+
+    # The eval prompt contains literal JSON braces, which LangChain's template
+    # parser would misinterpret as variables — hence messages built directly
+    # inside _evaluate_transcript rather than a ChatPromptTemplate.
+    result = _evaluate_transcript(
+        track, role, transcript, EVAL_SYSTEM_PROMPT.format(track=track, role=role),
     )
+    if not result:
+        # Both providers failed and the candidate is getting the placeholder
+        # report. This is the metric to alert on — it is the worst outcome the
+        # evaluation path can produce, and it is invisible to the candidate.
+        log.warning("llm.evaluate_session.defaulted", track=track)
+        metrics.record_evaluation(track, "defaulted")
+        return _default_evaluation()
 
-    system_content = EVAL_SYSTEM_PROMPT.format(track=track, role=role)
-
-    # Build messages directly — the eval prompt contains literal JSON braces
-    # which LangChain's template parser would misinterpret as variables.
-    lc_messages = [
-        SystemMessage(content=system_content),
-        HumanMessage(content=transcript or "The candidate did not answer any questions."),
-    ]
-
-    parser = JsonOutputParser(pydantic_object=EvaluationResult)
-
-    try:
-        llm = _make_azure_llm(temperature=0.3, max_tokens=700)
-        llm_json = llm.bind(response_format={"type": "json_object"})
-        chain = llm_json | parser
-        result = chain.invoke(lc_messages)
-        # Pydantic model → plain dict for the rest of the app
-        if hasattr(result, "model_dump"):
-            result = result.model_dump()
-        _reconcile_score(result)
-        result = _validate_eval_result(result)
-        return _self_critique(track, role, transcript, result)
-    except Exception as exc:
-        status = getattr(exc, "status_code", None)
-        if status is None or status == 429 or (isinstance(status, int) and status >= 500):
-            raw = _fallback_chat(
-                [
-                    {"role": "system", "content": system_content},
-                    {"role": "user",   "content": transcript or "The candidate did not answer any questions."},
-                ],
-                max_tokens=700, temperature=0.3, json_mode=True,
-            )
-            try:
-                # Some fallback providers wrap JSON in markdown fences even
-                # with response_format=json_object set — strip before parsing.
-                cleaned = re.sub(r"^```[a-z]*\n?", "", raw.strip())
-                cleaned = re.sub(r"\n?```$", "", cleaned).strip()
-                result = json.loads(cleaned)
-                _reconcile_score(result)
-                result = _validate_eval_result(result)
-                return _self_critique(track, role, transcript, result)
-            except (json.JSONDecodeError, ValueError, TypeError):
-                pass
-        # Last-resort default
-        return {
-            "overall_score": 5,
-            "summary": "Could not generate a detailed report this time. Your transcript has been saved.",
-            "star_analysis": {
-                "situation": "—", "task": "—", "action": "—", "result": "—",
-                "star_score": 0, "missing_elements": [],
-            },
-            "evaluations": [],
-        }
+    metrics.record_evaluation(track, "single_pass")
+    _reconcile_score(result)
+    return _self_critique(track, role, transcript, result)
 
 
 def _extract_diagram_descriptions(history: list[dict]) -> str:
@@ -662,7 +899,7 @@ def evaluate_diagram(
     }
 
     try:
-        llm_client = _make_azure_llm(temperature=0.1, max_tokens=400)
+        llm_client = _make_azure_llm(temperature=0.1, max_tokens=400, call_site="evaluate_diagram")
         llm_json = llm_client.bind(response_format={"type": "json_object"})
         chain = llm_json | JsonOutputParser()
         result = chain.invoke([HumanMessage(content=prompt)])
@@ -675,7 +912,7 @@ def evaluate_diagram(
             try:
                 raw = _fallback_chat(
                     [{"role": "user", "content": prompt}],
-                    max_tokens=400, temperature=0.1, json_mode=True,
+                    max_tokens=400, temperature=0.1, json_mode=True, call_site="evaluate_diagram",
                 )
                 cleaned = re.sub(r"^```[a-z]*\n?", "", raw.strip())
                 cleaned = re.sub(r"\n?```$", "", cleaned).strip()

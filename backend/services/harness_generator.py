@@ -183,7 +183,7 @@ def _generate(language: str, question: dict, corrective_feedback: str | None = N
         from langchain_core.messages import HumanMessage, SystemMessage
 
         from services.llm import _make_llm
-        llm = _make_llm(temperature=0.2, max_tokens=3000)
+        llm = _make_llm(temperature=0.2, max_tokens=3000, call_site="harness_generator.harness")
         result = llm.invoke([SystemMessage(content=system), HumanMessage(content=user)])
         raw = result.content
     except Exception:
@@ -462,13 +462,13 @@ def _generate_signature(language: str, method_name: str, question: dict) -> str 
     from services.llm import _fallback_chat, _make_llm
 
     try:
-        llm = _make_llm(temperature=0.2, max_tokens=400)
+        llm = _make_llm(temperature=0.2, max_tokens=400, call_site="harness_generator.signature")
         raw = llm.invoke([SystemMessage(content=system), HumanMessage(content=user)]).content
     except Exception:
         try:
             raw = _fallback_chat(
                 [{"role": "system", "content": system}, {"role": "user", "content": user}],
-                max_tokens=400, temperature=0.2,
+                max_tokens=400, temperature=0.2, call_site="harness_generator.signature",
             )
         except Exception:
             return None

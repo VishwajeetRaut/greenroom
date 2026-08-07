@@ -1,0 +1,19 @@
+apiVersion: 1
+datasources:
+  - name: Prometheus
+    # Pinned uid so the provisioned dashboard can reference this datasource by
+    # a stable id. Without it Grafana generates a random uid on first start and
+    # every panel in greenroom.json renders "datasource not found".
+    uid: greenroom-prom
+    type: prometheus
+    access: proxy
+    url: http://prometheus:9090
+    isDefault: true
+    editable: false
+
+  - name: Loki
+    uid: greenroom-loki
+    type: loki
+    access: proxy
+    url: http://loki:3100
+    editable: false

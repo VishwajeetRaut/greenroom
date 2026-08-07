@@ -11,6 +11,7 @@ were started on a sibling replica.
 from __future__ import annotations
 
 import asyncio
+import os
 import threading
 from datetime import datetime, timezone
 
@@ -22,9 +23,22 @@ _session_locks: dict[str, asyncio.Lock] = {}
 _locks_guard = threading.Lock()
 
 
+# Locks are only removed by evict(), which runs on an explicit delete. A
+# session that times out or is simply abandoned leaves its lock behind
+# forever, so a long-lived replica accumulates one per session it has ever
+# seen. Bounded here rather than left to grow.
+_MAX_TRACKED_LOCKS = int(os.environ.get("MAX_TRACKED_SESSION_LOCKS", "4096"))
+
+
 def session_lock(session_id: str) -> asyncio.Lock:
     with _locks_guard:
         if session_id not in _session_locks:
+            if len(_session_locks) >= _MAX_TRACKED_LOCKS:
+                # Drop the locks nobody is holding. A lock that is currently
+                # held must survive — evicting it would hand a second caller a
+                # fresh lock and break the mutual exclusion it exists for.
+                for key in [k for k, lock in _session_locks.items() if not lock.locked()][:_MAX_TRACKED_LOCKS // 4]:
+                    del _session_locks[key]
             _session_locks[session_id] = asyncio.Lock()
         return _session_locks[session_id]
 
@@ -74,6 +88,10 @@ def get_session(session_id: str) -> dict | None:
         "assigned_question": assigned_question,
         "next_sequence_no": len(history),
         "last_activity_at": last_activity,
+        # Wall-clock cap is measured from here. Rebuilt from the row rather
+        # than reset to now(), or a replica restart would silently hand every
+        # in-flight session a fresh duration budget.
+        "started_at": row.get("created_at"),
         "status": row.get("status") or "active",
         "diagram_elements": row.get("diagram_elements") or [],
         # Only the current one is recoverable from a rebuild — full skip

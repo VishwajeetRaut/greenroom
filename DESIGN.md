@@ -115,15 +115,26 @@ The rate limiter uses a `rate_limit_events` table in Supabase, with one row per 
 | Persistence across restart | Lost | Survives restarts |
 | Local dev without DB | Only mode | Auto-fallback |
 
-### Session concurrency cap, idle timeout, and turn limit
+### Session limits: concurrency, idle, turns, and wall-clock duration
 
-Three independent session-level guards in `session_guard.py`:
+Four independent session-level guards in `session_guard.py`:
 
 - **Concurrency cap:** `check_session_limit()` counts `sessions WHERE status='active' AND user_id=?`. Returns HTTP 429 if >= 3. Configurable via `MAX_ACTIVE_SESSIONS`.
 - **Idle timeout:** `check_idle_timeout()` compares `last_activity_at` against `now()`. Returns HTTP 410 if > 30 minutes idle. Configurable via `SESSION_IDLE_TIMEOUT_MINUTES`.
-- **Turn limit:** `is_turn_limit_reached()` counts candidate turns in the session history. Once `MAX_CANDIDATE_TURNS` (default 15) is reached, the interviewer wraps the session up instead of continuing to ask questions, so a session can't run indefinitely.
+- **Turn limit:** `is_turn_limit_reached()` counts candidate turns in the session history. Once `MAX_CANDIDATE_TURNS` (default 15) is reached, the interviewer wraps the session up instead of continuing to ask questions.
+- **Wall-clock duration:** `is_duration_limit_reached()` measures from `started_at` and is unaffected by activity. Default 120 minutes, configurable via `MAX_SESSION_DURATION_MINUTES`.
 
-All three run on every `/message` call after JWT validation, before the LLM call.
+**Idle and duration are different failures and end differently.** An idle session was *abandoned*, so it expires hard with a 410. A session that hit the turn or duration limit was *used* — the candidate has an hour or more of work in it, so it ends gracefully (`done: true`) and they can still click "End session" and collect the evaluation they earned. Expiring that with a 410 would throw the work away.
+
+Until the duration cap existed, nothing actually bounded a session: the turn limit caps how much is *said*, and the idle timeout only measures *gaps*, so a candidate answering every 29 minutes could hold a session — and one of their three concurrent slots, and a replica's memory — open for most of a day.
+
+#### Activity is more than messages
+
+The idle timer used to be refreshed by only two endpoints, `POST /message` and `GET /resume`. Running tests, switching language and editing the diagram were all invisible to it. The consequence: **a candidate who spent half an hour coding, or drawing — which is most of a system-design session — got a 410 on their next message despite never having stopped working.** The Excalidraw canvas autosaves every two seconds and counted for nothing.
+
+`touch(session)` now records activity, and every endpoint a candidate can reach while working calls it: `/message`, `/code/test`, `/diagram`, `/boilerplate`, and `/resume`. A test asserts this by inspecting the router source, because forgetting one fails silently — the candidate just gets a 410 later, far from the cause.
+
+Order matters: `check_idle_timeout()` runs **before** `touch()`, or any request could revive a session that had already expired. `/resume` is the one deliberate exception — an explicit resume by the owner is a real "I'm back" signal — and it is bounded, because the wall-clock cap is measured from `started_at` and no amount of resuming moves it.
 
 ### Judge0-based code execution (Piston + Wandbox retired, 2026-08-03)
 
@@ -201,9 +212,112 @@ When a system-design session ends, `llm.evaluate_diagram()` scores the candidate
 
 `GET /api/tts/speak` previously regenerated audio via `edge-tts` from scratch on every call, even for text already synthesized moments earlier — a candidate replaying the interviewer's question, or navigating back to one already asked, paid the full latency and (conceptually) cost again. `services/tts.py` now caches on disk, keyed by `sha256(voice:text)`, with atomic writes (temp file + rename) and LRU eviction once the cache exceeds a bounded entry count.
 
+### Load testing: what actually broke first
+
+Measured with `backend/scripts/load_test.py`; full numbers and method in [LOAD_TEST.md](docs/LOAD_TEST.md).
+
+**`/api/health` was the first thing to fold** — 87 rps at p50 539 ms, against 3,268 rps at 14 ms for `/metrics` on the same server. A health endpoint that collapses under load is worse than useless: it is what tells the orchestrator to kill a container that was actually fine, so this would have surfaced as random instability rather than as a slow endpoint. Two causes, both fixed: a fresh `httpx.AsyncClient` (and its TLS context) was constructed per request, and the Piston probe ran on every call, turning a burst of health checks into a burst of outbound requests. Now ~4,300 rps at p50 10 ms.
+
+Caching the probe then introduced a **cache stampede** — every concurrent caller missing at the same instant the entry expired. The median looked healthy while p99 ran 12× it, which is exactly why `load_test.py` prints a tail ratio. `_piston_health` is single-flight now.
+
+**Auth was a network round-trip per request, and could starve the threadpool.** `get_current_user` validated every request against Supabase with no caching, and its retry used a *blocking* `time.sleep(0.3)` inside a dependency FastAPI runs in its 40-worker threadpool — the same pool shared by every `run_in_threadpool` call in the app. Roughly 133 failed auths per second saturates it and stalls every in-flight interview, and reaching that needs only an expired token, a frontend retry loop, or a Supabase blip (which is when all the retries fire at once). `services/auth_cache.py` caches successes for 60 s and failures for 5 s; the pause dropped to 50 ms. The 401 path went from 93 to 514 rps.
+
+The cache keys on a SHA-256 of the token, never the token — otherwise it is a bag of live credentials sitting in memory — and never outlives the JWT's own `exp`. That claim is read *without* verifying the signature, which is safe only because it is used to expire entries **earlier**, never to authorise anything.
+
+Two smaller fixes: the rate limiter ran an **unscoped `DELETE` sweeping every user's rows on every request** (now sampled at 2%), and `_session_locks` grew forever because it was only cleaned on explicit delete (now bounded, skipping locks currently held — evicting one would break the mutual exclusion it exists for).
+
+**The real ceiling isn't CPU.** At ~8,600 tokens per completed session against Groq's 100,000/day free tier, that is roughly 11 full interviews per day. The binding constraint is billing, not capacity.
+
+### Metrics and alerting: what the structured logger was always for
+
+`services/logger.py` has emitted one structured JSON object per line since day one, and until now nothing consumed it. That is why `docs/EVALUATION_METRICS.md` §6 and §7 could list four things as *not yet measurable* despite the app already logging all four: the data existed, it just went to stdout and stopped there.
+
+`services/metrics.py` exposes Prometheus counters and histograms at `GET /metrics`, attached at the points that already existed — the request middleware, `token_meter.record` (the single chokepoint every LLM call passes through), `guardrail.sanitize`, and `piston.run_code`. `infra/observability/` is a provisioned Prometheus + Grafana + Loki + Promtail stack: metrics from `/metrics`, logs shipped from the JSON the logger already writes.
+
+The four gaps closed: **P50/P95 latency** (`greenroom_http_request_duration_seconds`), **LLM fallback rate** (`greenroom_llm_fallback_total`), **Piston vs Wandbox split** (`greenroom_sandbox_runs_total{backend}`), and **guardrail trigger rate** (`greenroom_guardrail_checks_total{layer,result}` — per layer, because the regex and the LLM judge catching different things is the entire argument for having both).
+
+**Every alert names a failure that is invisible to the candidate but ruins their session.** That is the distinction worth designing around: a candidate who receives a placeholder evaluation, or a canned guardrail fallback question instead of a real follow-up, sees a working product and a worse interview. `EvaluationsDefaulting` is the sharpest of these — both providers failed and the candidate got nothing after finishing a whole interview.
+
+**Cardinality is enforced, not hoped for.** HTTP paths are recorded as the route template (`/api/interview/{session_id}/resume`), never the raw path, and unmatched requests collapse to `unmatched` rather than the URL — a 404 flood is exactly when minting a time series per URL would hurt most. In Loki only `level` and `event` become labels; both are closed sets. Tests assert both rules, and assert that no label value ever looks like a UUID or an email.
+
+`/metrics` is unauthenticated by design (scrapers don't carry bearer tokens) and exposes only aggregate counters — no prompts, transcripts, or user identifiers. Restrict it at the ingress if it ever leaves the VNet.
+
+### Evaluating a long session without blowing the token budget
+
+Every candidate turn appends the candidate's *entire current code* to the history (`candidate_content += f"\n\n[Candidate's current code]\n{req.code}"`). `code` is capped at 100,000 characters and `message` at 20,000, across up to 15 candidate turns — so a transcript can reach ~1.8M characters, most of it duplicated copies of earlier revisions of one program. System-design sessions do the same with the serialised `[Architecture diagram]` block.
+
+Measured, not theorised: a 15-turn session carrying an ~8KB file produced a 128,000-character transcript that Groq billed at **55,467 tokens — 55% of the free tier's entire 100,000-token daily allowance, in a single call.** It returned 429. (Worth noting: code tokenises at roughly **2.3 characters per token**, not the ~4 that prose does, so a chars/4 estimate understates a code-heavy transcript by about 70%. `transcript.estimate_tokens` is deliberately pessimistic for that reason.)
+
+`services/transcript.py` applies three stages, only as far as needed, so a session that already worked is completely unaffected:
+
+1. **Under budget** → send verbatim. Byte-identical to the previous behaviour.
+2. **Over budget** → drop superseded code and diagram blocks, keeping the final version of each in full. The placeholder is left in place rather than deleted, so the evaluator can still see the candidate was iterating and roughly how much they wrote.
+3. **Still over** → chunk on turn boundaries and evaluate map-reduce style.
+
+In the map stage each segment produces structured *notes* (strengths, weaknesses, evidence) rather than a score: a segment can't be scored without the rest of the interview for context, and averaging per-segment scores would flatten exactly the arc an interview is meant to show. One reduce call turns the notes into the same `EvaluationResult` the single-pass path returns, so nothing downstream knows which path ran. A segment that fails is skipped rather than sinking the report.
+
+On the measured case this took the evaluation from a 429 to **6,546 input tokens** — a ~90% reduction, and 6.5% of the daily allowance instead of 55%.
+
+#### The failure this also fixed
+
+`_fallback_chat` sat *outside* the inner `try` in `evaluate_session`. So when Groq 429'd on an oversized transcript and the fallback provider also failed, the exception escaped the function entirely and `POST /interview/end` returned a 500 — **a candidate who had just finished a two-hour interview got nothing at all.** `evaluate_session` now never raises: every failure path degrades to the default report, because losing the evaluation is the worst outcome this function can produce.
+
 ### Self-critique pass on the evaluation chain
 
 `evaluate_session()` runs a second LLM pass after the draft score and feedback are generated: a reviewer persona checks the draft against the transcript and corrects it where the score doesn't match the written feedback, the feedback reads as generic filler, or the transcript has evidence the first pass missed. If the draft already holds up, the reviewer is instructed to leave it unchanged rather than edit for its own sake. The pass is best-effort — any failure (bad JSON, LLM error) just falls back to the original draft, so it can never turn a working evaluation into a broken one, and it's controlled by `EVAL_SELF_CRITIQUE_ENABLED` so it can be switched off without a code change if it adds latency or cost that isn't worth it.
+
+### Architecture palette: labels are what get graded
+
+Excalidraw's primitive shapes are fixed by the library, so "more shapes" isn't the lever here — labels are. A diagram is scored by serialising the board and asking the model which of the question's `expected_components` are present. The serialiser (`useInterviewSession.generateBoardDescription`) reads a shape's **bound text**, and falls back to the element type when there isn't any — so an unlabelled box serialises as the literal string `"rectangle"` and matches nothing. It contributes zero to the score no matter how well placed it is.
+
+The board now has a palette of one-click, pre-labelled components. Every label is copied verbatim from the `expected_components` vocabulary actually used across the 20 system-design questions, ordered by frequency there (load balancer 15×, cache 8×, message queue 8×, database 7×, CDN 7×, app server 6×, object storage 4×). Inserting from the palette means the diagram uses the exact names the grader looks for, instead of "LB", "postgres", or an unlabelled box. `client` is the one entry with no `expected_components` backing — nothing grades it, but nearly every design starts from one and arrows need an origin.
+
+The palette data and placement geometry live in `lib/architectureComponents.js`, deliberately free of any Excalidraw import: that is the part worth unit-testing, and pulling the editor bundle in just to check a label list would make those tests depend on a canvas renderer. A test reads the real question bank and fails if the palette drifts from the graded vocabulary, or if a rename in the bank orphans a palette entry.
+
+Placement scans for the first free grid slot in the *visible viewport* — a fixed insertion point would stack every component on the last one, and the scene origin would drop them off-screen the moment the candidate scrolls.
+
+### System-design questions: structured tags and per-difficulty scale tiers
+
+System-design questions already carried scale numbers, but only as free text inside `constraints` (`"100M writes/day (~1,200/sec)"`). Nothing could read them, so nothing could act on them: every candidate got whatever scale the author happened to type, and difficulty was fixed at authoring time.
+
+Each question now carries `tags` (controlled vocabulary — `read-heavy`, `geo-distributed`, …), a one-line `core_challenge`, and `scale_tiers`: a set of `daily_active_users` / `writes_per_day` / `reads_per_day` / `peak_qps` / `data_volume` / `latency_slo` figures for each of easy, medium and hard. The same problem can now be posed at three genuinely different scales — a JD's seniority picks the tier (`services/jd_analyzer.scale_tier_for`), so a senior candidate gets the harder numbers on the same problem rather than only being shown different problems.
+
+Generated by `scripts/generate_sd_metadata.py`, and **verified rather than trusted** — the same principle applied to harnesses and generated questions. Every tier set must satisfy: tags drawn only from the vocabulary; all three tiers sharing an identical field set; every volume figure strictly increasing easy→medium→hard; every latency budget strictly *decreasing* (the one field where "harder" points the other way, and the mistake a model makes reliably if nothing checks it); no per-second rate in a `*_per_day` field; `data_volume` carrying a real byte unit. Failures feed the exact reason back into a corrective retry.
+
+Two defects that only surfaced because the checks existed:
+
+- **The generic latency ladder.** Asked for three tiers, the model invents `1s / 200ms / 50ms` and attaches it to every question regardless of the problem — so a chat system whose stated budget is 500 ms ended up claiming p99 < 50 ms. Since 11 of the 20 questions are natively hard, that ladder was about to assert a 50 ms p99 across most of the bank. The fix is an anchoring rule: the native tier's latency must equal the budget the question already states.
+- **A silent parser bug that disabled that very rule.** The latency regex alternated `ms|sec|seconds|s|…`, which fails on `"1 second"` — `sec` matches but the trailing `\b` doesn't, and every shorter alternative fails the same way. The result wasn't a visible error; it just quietly switched the anchoring check off for that question, which is how a `p99 < 50ms` tier survived on a question whose stated budget was 1 second. Alternation is now longest-first, and a parametrised test pins the singular/plural cases.
+
+The candidate-facing board previously showed **nothing** about the problem — requirements had to be held in working memory from what the interviewer said out loud, which is the wrong thing to spend working memory on in a system-design interview. It now renders a collapsible requirements panel with the tier's scale figures, tags, and core challenge. The interviewer prompt gets the same numbers, so "how would you handle scale?" becomes "how does this hold at 2B writes/day?".
+
+Everything degrades to the previous behaviour: a question without `scale_tiers` returns `None` from `scale_for` and keeps using its authored `constraints`.
+
+### Job description: analysed once, then it actually steers the interview
+
+A pasted job description used to do exactly two things: get appended verbatim to the interviewer's system prompt, and nothing else. It never reached question selection — `question_generator.select_or_generate_question` was called with only `(role, candidate_intro)` — so a JD asking for a senior distributed-systems engineer heavy on graph algorithms still produced the same randomly chosen easy array problem as a blank JD.
+
+Compounding that, the `role` every prompt interpolated was the hardcoded string `"Software Engineer"`, sent as a literal by the frontend and defaulted identically in `StartSessionRequest`. Persona, question selection, and evaluation were all written for a generic SWE regardless of what the candidate pasted.
+
+`services/jd_analyzer.py` runs one LLM call at session start and turns the JD into a structured profile: role title, seniority, tech stack, topic preferences per track, and a one-line focus summary. That profile then replaces the hardcoded role for the whole session and flows into question selection — narrowing the catalog shown to the selector model, biasing the random fallback picker, and mapping seniority onto the bank's difficulty tiers (`senior`/`staff` → medium+hard).
+
+**The model never invents topic names.** The bank's `topic` field is a fixed and genuinely inconsistent vocabulary (`hash-table` but `binary search`, `dynamic-programming` but `data structures`), so free-text topics would match no question and silently degrade to a random pick. The real vocabulary is read out of the bank, shown to the model, and anything returned outside it is dropped — the same constrain-then-validate-anyway approach `_build_catalog` uses.
+
+**Every narrowing widens back rather than starving.** Topic coverage is very uneven (81 `array` questions, 3 `graph`), so a strict filter would routinely match nothing. Each filter falls back to difficulty-only, then to unfiltered. A JD must be able to steer the choice; it must never be able to leave a candidate with no question at all. Likewise every analysis failure path returns `None`, and `None` restores exactly the pre-existing behaviour — a JD can degrade selection back to random, never block a session from starting.
+
+Sending the compact profile instead of the raw paste is also a cost fix: the interviewer system prompt is re-sent on **every turn**, so a 5000-character JD was being paid for once per turn, on the call that is already 61% of session cost (see [MODEL_COST_MATRIX.md](./docs/MODEL_COST_MATRIX.md)). The analysis itself is cached on the JD text — the same posting is routinely pasted by many candidates — so its one-time cost amortises toward zero.
+
+### Content-addressed response cache for repeated LLM calls
+
+The durable, expensive artefacts — generated harnesses, signatures, and questions — were already cached in Supabase. What wasn't cached was the per-interaction traffic that repeats *within* a single coding interview.
+
+The dominant case: the dynamic test runner's LLM case generator (`test_runner._generate_cases`) fired on **every** "Run tests" click for a problem the interviewer invented on its own. A candidate clicks Run tests 5-20 times against one problem in a session, and each click re-sent the full problem statement and re-generated the same six cases at temperature 0.1 — the same request, billed every time. `services/llm_cache.py` keys the response on a SHA-256 of the prompt inputs, so those N calls collapse to 1.
+
+The opening greeting (`llm.opening_message`) is the second case: its only inputs are `(track, role)`, a handful of distinct values across the whole product, yet it was generated fresh at every session start. Collapsing it to one cached string would make every candidate hear the identical sentence forever, so it uses a **variant pool** instead — the first `LLM_OPENING_POOL_SIZE` sessions per `(track, role)` generate and fill the pool, and every session after that is served free from it at random, preserving the variety the temperature-0.9 call was there to provide.
+
+The cache is in-process and bounded (LRU + TTL), deliberately matching the durability characteristics of `session_store` rather than introducing new infrastructure — it resets on restart and is per-replica, which is acceptable because a cache miss is only ever a cost, never a correctness problem. A falsy result (failed generation, unparseable JSON) is **not** cached: that's transient, and the next click should get a real attempt rather than a pinned failure for the whole TTL. Durable negative results stay where they belong, in `harness_generator._UNSUPPORTED_MARKER`.
+
+Each entry records the prompt and response sizes it stands in for, so `GET /api/analytics/llm-cache` reports a measured saving rather than an estimate — those counters are the input to the model cost comparison.
 
 ---
 
@@ -338,6 +452,10 @@ ALLOWED_ORIGINS=https://greenroom-frontend...azurecontainerapps.io
 MAX_ACTIVE_SESSIONS=3                  # Default: 3
 SESSION_IDLE_TIMEOUT_MINUTES=30        # Default: 30
 MAX_CANDIDATE_TURNS=15                 # Default: 15
+MAX_SESSION_DURATION_MINUTES=120       # Default: 120 (wall-clock cap)
+EVAL_MAX_TRANSCRIPT_TOKENS=12000       # Default: 12000 (transcript budget)
+METRICS_ENABLED=true                   # Default: true (Prometheus /metrics)
+AUTH_CACHE_TTL_SECONDS=60              # Default: 60 (validated-JWT cache)
 EVAL_SELF_CRITIQUE_ENABLED=true        # Default: true
 
 # Azure OpenAI — end-of-session evaluation report only (evaluate_session,
@@ -356,6 +474,11 @@ JUDGE0_PUBLIC_URL=https://ce.judge0.com          # Default shown
 JUDGE0_RAPIDAPI_URL=https://judge0-ce.p.rapidapi.com  # Default shown
 JUDGE0_RAPIDAPI_KEY=                             # Optional — https://rapidapi.com/judge0-official/api/judge0-ce
 JUDGE0_RAPIDAPI_HOST=judge0-ce.p.rapidapi.com    # Default shown
+LLM_CACHE_ENABLED=true                 # Default: true
+LLM_CACHE_TTL_SECONDS=86400            # Default: 86400 (24h)
+LLM_CACHE_MAX_ENTRIES=512              # Default: 512
+LLM_OPENING_POOL_SIZE=5                # Default: 5
+LLM_METER_ENABLED=true                 # Default: true (token accounting)
 ```
 
 **Frontend:**
@@ -432,6 +555,9 @@ backend/
     test_runner.py           # call/expected and stdin/stdout test modes, harness injection; _add_js_new_keywords() fixes JS class-instantiation syntax
     harness_generator.py     # Java/C++ harness + Python/JS signature generation: dataset-first (deterministic driver, no LLM), LLM+sandbox-verify as fallback, negative-cached once exhausted
     guardrail.py             # 4-layer answer-leak prevention: prompt + regex + regeneration + fallback
+    llm_cache.py             # Content-addressed TTL+LRU cache for repeated LLM calls (test-case generation, opening greeting) with measured token-saving counters
+    token_meter.py           # Provider-reported token accounting per call site, attached as a LangChain callback in _make_llm; feeds the model cost matrix
+    jd_analyzer.py           # One-call structured analysis of a pasted job description (role, seniority, stack, per-track topics from the bank's own vocabulary); drives role, question topic and difficulty
     supabase_client.py       # Singleton Supabase client using service-role key
     logger.py                # structlog JSON logger
     retry.py                 # Exponential-backoff retry decorator
@@ -590,6 +716,8 @@ analytics_events (
 |---|---|---|
 | `POST` | `/api/analytics/event` | Fire-and-forget usage/click event. Persists in the background via `BackgroundTasks`; always returns 202 immediately regardless of whether the write succeeds. |
 | `GET` | `/api/analytics/stats` | Aggregated telemetry for the in-app dashboard: session counts, average scores overall/per-track, completion rates, 14-day activity, language usage, score distribution. |
+| `GET` | `/api/analytics/llm-cache` | LLM response cache counters: hits, misses, hit rate, entries, evictions, and measured prompt/completion tokens saved. Aggregate and in-process only — no prompts, responses, or per-user data; resets on restart. |
+| `GET` | `/api/analytics/llm-usage` | Provider-reported token usage broken down by call site, with computed cost. Token counts are exact; dollar figures use indicative pricing (see `token_meter.PRICING`). In-process, resets on restart. |
 
 ### Health
 

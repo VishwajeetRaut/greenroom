@@ -1,0 +1,101 @@
+# Alert rules for Greenroom.
+#
+# Each rule names a failure that is INVISIBLE to the candidate but ruins their
+# session — that is the whole reason this stack exists. A candidate who gets a
+# placeholder evaluation, or a canned guardrail fallback question, sees a
+# working product and a worse interview.
+groups:
+  - name: greenroom
+    rules:
+      # The worst outcome the evaluation path can produce: both providers
+      # failed and the candidate got the placeholder report after finishing a
+      # whole interview.
+      - alert: EvaluationsDefaulting
+        expr: |
+          sum(rate(greenroom_evaluations_total{path="defaulted"}[15m]))
+            / clamp_min(sum(rate(greenroom_evaluations_total[15m])), 0.0001) > 0.1
+        for: 10m
+        labels: { severity: critical }
+        annotations:
+          summary: "Over 10% of evaluations are returning the placeholder report"
+          description: "Candidates are finishing interviews and getting no real score. Check Groq quota and the fallback provider."
+
+      # Groq's free tier is 100k tokens/day. Sustained fallback means the
+      # primary is down or the daily quota is gone.
+      - alert: LLMFallbackSustained
+        expr: sum(rate(greenroom_llm_fallback_total[10m])) > 0
+        for: 10m
+        labels: { severity: warning }
+        annotations:
+          summary: "Falling back to the secondary LLM provider"
+          description: "Groq is failing (429 quota, or 5xx). The interview still runs, on the fallback model."
+
+      # Execution has three tiers: judge0_public -> judge0_rapidapi ->
+      # local subprocess. The last one runs candidate code INSIDE the backend
+      # container, with none of a sandbox's isolation. It exists so Run Tests
+      # keeps working during a Judge0 outage, and it should be rare — sustained
+      # use means both sandboxes are down and nobody has noticed.
+      - alert: SandboxOnLocalSubprocess
+        expr: |
+          sum(rate(greenroom_sandbox_runs_total{backend="subprocess"}[15m]))
+            / clamp_min(sum(rate(greenroom_sandbox_runs_total[15m])), 0.0001) > 0.2
+        for: 15m
+        labels: { severity: critical }
+        annotations:
+          summary: "Candidate code is running in the backend container, not a sandbox"
+          description: "Both Judge0 tiers are failing, so execution fell through to _local_subprocess. That tier has no isolation — treat it as a temporary bridge, not a steady state."
+
+      - alert: SandboxOnRapidAPIFallback
+        expr: |
+          sum(rate(greenroom_sandbox_runs_total{backend="judge0_rapidapi"}[15m]))
+            / clamp_min(sum(rate(greenroom_sandbox_runs_total[15m])), 0.0001) > 0.5
+        for: 15m
+        labels: { severity: warning }
+        annotations:
+          summary: "Most execution is on the Judge0 RapidAPI fallback"
+          description: "The public Judge0 endpoint is failing. RapidAPI is rate-limited and keyed, so this degrades under load."
+
+      - alert: SandboxFullyDown
+        expr: sum(rate(greenroom_sandbox_runs_total{backend="none"}[10m])) > 0
+        for: 5m
+        labels: { severity: critical }
+        annotations:
+          summary: "Both sandboxes are unavailable — Run Tests is broken"
+
+      # The guardrail's last resort. Reaching it means the model leaked an
+      # answer AND failed to correct itself, so the candidate got a canned
+      # question instead of a real follow-up.
+      - alert: GuardrailFallingBack
+        expr: sum(rate(greenroom_guardrail_checks_total{layer="safe_fallback"}[15m])) > 0.05
+        for: 15m
+        labels: { severity: warning }
+        annotations:
+          summary: "Guardrail is serving canned fallback questions"
+          description: "The model is leaking answers and not correcting on regeneration."
+
+      - alert: HighErrorRate
+        expr: |
+          sum(rate(greenroom_http_requests_total{status=~"5.."}[5m]))
+            / clamp_min(sum(rate(greenroom_http_requests_total[5m])), 0.0001) > 0.05
+        for: 5m
+        labels: { severity: critical }
+        annotations:
+          summary: "Over 5% of requests are returning 5xx"
+
+      - alert: SlowInterviewTurns
+        expr: |
+          histogram_quantile(0.95,
+            sum(rate(greenroom_http_request_duration_seconds_bucket{route="/api/interview/message"}[10m])) by (le)
+          ) > 10
+        for: 10m
+        labels: { severity: warning }
+        annotations:
+          summary: "P95 interview turn latency is over 10s"
+          description: "The conversation stops feeling live at this point."
+
+      - alert: BackendDown
+        expr: up{job="greenroom-api"} == 0
+        for: 2m
+        labels: { severity: critical }
+        annotations:
+          summary: "Backend is not responding to scrapes"

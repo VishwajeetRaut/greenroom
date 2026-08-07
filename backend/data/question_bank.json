@@ -18174,7 +18174,35 @@
       "cache",
       "hash generator",
       "CDN"
-    ]
+    ],
+    "tags": [
+      "read-heavy",
+      "low-latency",
+      "caching",
+      "high-availability",
+      "geo-distributed"
+    ],
+    "core_challenge": "Designing a scalable and highly available URL shortening service that can handle a large volume of writes and reads while maintaining low latency and ensuring unique and non-guessable short codes",
+    "scale_tiers": {
+      "easy": {
+        "writes_per_day": "10M",
+        "reads_per_day": "1B",
+        "peak_qps": "10K/sec",
+        "latency_slo": "p99 < 200ms"
+      },
+      "medium": {
+        "writes_per_day": "100M",
+        "reads_per_day": "10B",
+        "peak_qps": "115K/sec",
+        "latency_slo": "p99 < 100ms"
+      },
+      "hard": {
+        "writes_per_day": "1B",
+        "reads_per_day": "100B",
+        "peak_qps": "1M/sec",
+        "latency_slo": "p99 < 50ms"
+      }
+    }
   },
   {
     "id": "chat-system",
@@ -18202,7 +18230,41 @@
       "push notification service",
       "load balancer",
       "presence service"
-    ]
+    ],
+    "tags": [
+      "real-time",
+      "low-latency",
+      "geo-distributed",
+      "high-availability",
+      "strong-consistency"
+    ],
+    "core_challenge": "Designing a system that can handle a large number of concurrent users and messages while maintaining low latency and high availability.",
+    "scale_tiers": {
+      "easy": {
+        "daily_active_users": "1M",
+        "writes_per_day": "40M",
+        "reads_per_day": "80M",
+        "peak_qps": "1K/sec",
+        "data_volume": "1TB",
+        "latency_slo": "p99 < 2s"
+      },
+      "medium": {
+        "daily_active_users": "10M",
+        "writes_per_day": "400M",
+        "reads_per_day": "800M",
+        "peak_qps": "10K/sec",
+        "data_volume": "10TB",
+        "latency_slo": "p99 < 1s"
+      },
+      "hard": {
+        "daily_active_users": "50M",
+        "writes_per_day": "2B",
+        "reads_per_day": "4B",
+        "peak_qps": "50K/sec",
+        "data_volume": "100TB",
+        "latency_slo": "p99 < 500ms"
+      }
+    }
   },
   {
     "id": "photo-sharing",
@@ -18231,7 +18293,41 @@
       "load balancer",
       "message queue",
       "feed generation service"
-    ]
+    ],
+    "tags": [
+      "read-heavy",
+      "low-latency",
+      "geo-distributed",
+      "high-availability",
+      "storage-heavy"
+    ],
+    "core_challenge": "Designing a scalable and performant photo sharing platform that can handle a large number of users and photos while ensuring low latency and high availability",
+    "scale_tiers": {
+      "easy": {
+        "daily_active_users": "10M",
+        "writes_per_day": "200K",
+        "reads_per_day": "20M",
+        "peak_qps": "5K/sec",
+        "data_volume": "100TB",
+        "latency_slo": "p99 < 500ms"
+      },
+      "medium": {
+        "daily_active_users": "100M",
+        "writes_per_day": "2M",
+        "reads_per_day": "200M",
+        "peak_qps": "50K/sec",
+        "data_volume": "1PB",
+        "latency_slo": "p99 < 200ms"
+      },
+      "hard": {
+        "daily_active_users": "500M",
+        "writes_per_day": "10M",
+        "reads_per_day": "1B",
+        "peak_qps": "200K/sec",
+        "data_volume": "5PB",
+        "latency_slo": "p99 < 50ms"
+      }
+    }
   },
   {
     "id": "ride-sharing",
@@ -18260,7 +18356,38 @@
       "push notification service",
       "load balancer",
       "websocket server"
-    ]
+    ],
+    "tags": [
+      "geo-distributed",
+      "real-time",
+      "low-latency",
+      "high-availability",
+      "caching"
+    ],
+    "core_challenge": "The system must efficiently handle a large volume of concurrent location updates and match riders with drivers in real-time while tolerating GPS inaccuracies and network dropouts.",
+    "scale_tiers": {
+      "easy": {
+        "writes_per_day": "100K",
+        "reads_per_day": "500K",
+        "peak_qps": "100/sec",
+        "data_volume": "10GB",
+        "latency_slo": "p99 < 500ms"
+      },
+      "medium": {
+        "writes_per_day": "1M",
+        "reads_per_day": "5M",
+        "peak_qps": "1K/sec",
+        "data_volume": "100GB",
+        "latency_slo": "p99 < 200ms"
+      },
+      "hard": {
+        "writes_per_day": "5M",
+        "reads_per_day": "25M",
+        "peak_qps": "5K/sec",
+        "data_volume": "1TB",
+        "latency_slo": "p99 < 50ms"
+      }
+    }
   },
   {
     "id": "search-autocomplete",
@@ -18286,7 +18413,31 @@
       "load balancer",
       "data pipeline",
       "database"
-    ]
+    ],
+    "tags": [
+      "read-heavy",
+      "low-latency",
+      "search-indexing",
+      "caching"
+    ],
+    "core_challenge": "Designing an efficient and scalable autocomplete system that can handle a large volume of searches and provide suggestions in real-time while maintaining a low latency",
+    "scale_tiers": {
+      "easy": {
+        "reads_per_day": "2B",
+        "peak_qps": "5K/sec",
+        "latency_slo": "p99 < 200ms"
+      },
+      "medium": {
+        "reads_per_day": "10B",
+        "peak_qps": "20K/sec",
+        "latency_slo": "p99 < 100ms"
+      },
+      "hard": {
+        "reads_per_day": "50B",
+        "peak_qps": "100K/sec",
+        "latency_slo": "p99 < 50ms"
+      }
+    }
   },
   {
     "id": "distributed-cache",
@@ -18313,7 +18464,32 @@
       "eviction manager",
       "replication",
       "client library"
-    ]
+    ],
+    "tags": [
+      "low-latency",
+      "high-availability",
+      "caching",
+      "sharding",
+      "read-heavy"
+    ],
+    "core_challenge": "Designing a distributed cache that can handle millions of requests per second while maintaining a high cache hit ratio and ensuring data consistency across nodes",
+    "scale_tiers": {
+      "easy": {
+        "peak_qps": "50K/sec",
+        "data_volume": "100GB",
+        "latency_slo": "p99 < 200ms"
+      },
+      "medium": {
+        "peak_qps": "500K/sec",
+        "data_volume": "1TB",
+        "latency_slo": "p99 < 100ms"
+      },
+      "hard": {
+        "peak_qps": "1M/sec",
+        "data_volume": "5TB",
+        "latency_slo": "p99 < 50ms"
+      }
+    }
   },
   {
     "id": "beh-disagreement-manager",
@@ -19139,7 +19315,41 @@
       "search index",
       "message queue",
       "CDN"
-    ]
+    ],
+    "tags": [
+      "read-heavy",
+      "real-time",
+      "low-latency",
+      "geo-distributed",
+      "high-availability"
+    ],
+    "core_challenge": "Designing a system that can handle a massive read-to-write ratio while maintaining near real-time updates and supporting keyword and hashtag search queries over billions of short tweets",
+    "scale_tiers": {
+      "easy": {
+        "daily_active_users": "10M",
+        "writes_per_day": "50M",
+        "reads_per_day": "5B",
+        "peak_qps": "100K/sec",
+        "data_volume": "100GB",
+        "latency_slo": "p99 < 1s"
+      },
+      "medium": {
+        "daily_active_users": "50M",
+        "writes_per_day": "200M",
+        "reads_per_day": "20B",
+        "peak_qps": "500K/sec",
+        "data_volume": "1TB",
+        "latency_slo": "p99 < 200ms"
+      },
+      "hard": {
+        "daily_active_users": "300M",
+        "writes_per_day": "500M",
+        "reads_per_day": "50B",
+        "peak_qps": "2M/sec",
+        "data_volume": "10TB",
+        "latency_slo": "p99 < 50ms"
+      }
+    }
   },
   {
     "id": "sd-web-crawler",
@@ -19167,7 +19377,39 @@
       "robots.txt cache",
       "link extractor",
       "scheduler"
-    ]
+    ],
+    "tags": [
+      "read-heavy",
+      "low-latency",
+      "geo-distributed",
+      "high-availability",
+      "caching",
+      "sharding"
+    ],
+    "core_challenge": "Designing a scalable and resilient web crawler that can handle billions of web pages while respecting rate limits and avoiding duplicate detection failures",
+    "scale_tiers": {
+      "easy": {
+        "writes_per_day": "10M",
+        "reads_per_day": "50M",
+        "peak_qps": "1K/sec",
+        "data_volume": "100GB",
+        "latency_slo": "p99 < 1s"
+      },
+      "medium": {
+        "writes_per_day": "100M",
+        "reads_per_day": "500M",
+        "peak_qps": "10K/sec",
+        "data_volume": "1TB",
+        "latency_slo": "p99 < 500ms"
+      },
+      "hard": {
+        "writes_per_day": "3B",
+        "reads_per_day": "15B",
+        "peak_qps": "100K/sec",
+        "data_volume": "100TB",
+        "latency_slo": "p99 < 200ms"
+      }
+    }
   },
   {
     "id": "sd-pastebin",
@@ -19195,7 +19437,38 @@
       "load balancer",
       "CDN",
       "expiry cleanup worker"
-    ]
+    ],
+    "tags": [
+      "read-heavy",
+      "write-heavy",
+      "low-latency",
+      "caching",
+      "storage-heavy"
+    ],
+    "core_challenge": "Designing a scalable and highly available system that can handle a large volume of reads and writes while ensuring unique and collision-resistant short aliases",
+    "scale_tiers": {
+      "easy": {
+        "writes_per_day": "100K",
+        "reads_per_day": "1M",
+        "peak_qps": "100/sec",
+        "data_volume": "1TB",
+        "latency_slo": "p99 < 1s"
+      },
+      "medium": {
+        "writes_per_day": "10M",
+        "reads_per_day": "100M",
+        "peak_qps": "10K/sec",
+        "data_volume": "100TB",
+        "latency_slo": "p99 < 200ms"
+      },
+      "hard": {
+        "writes_per_day": "100M",
+        "reads_per_day": "1B",
+        "peak_qps": "100K/sec",
+        "data_volume": "1PB",
+        "latency_slo": "p99 < 50ms"
+      }
+    }
   },
   {
     "id": "sd-rate-limiter",
@@ -19221,7 +19494,29 @@
       "sliding window or token bucket algorithm",
       "config service",
       "load balancer"
-    ]
+    ],
+    "tags": [
+      "rate-limiting",
+      "low-latency",
+      "geo-distributed",
+      "high-availability",
+      "real-time"
+    ],
+    "core_challenge": "Designing a distributed rate limiter that can handle per-user and per-IP throttling across multiple time windows without introducing significant latency or a single point of failure",
+    "scale_tiers": {
+      "easy": {
+        "peak_qps": "100/sec",
+        "latency_slo": "p99 < 10ms"
+      },
+      "medium": {
+        "peak_qps": "500/sec",
+        "latency_slo": "p99 < 5ms"
+      },
+      "hard": {
+        "peak_qps": "5K/sec",
+        "latency_slo": "p99 < 1ms"
+      }
+    }
   },
   {
     "id": "sd-news-feed",
@@ -19250,7 +19545,38 @@
       "graph database (friend graph)",
       "message queue",
       "load balancer"
-    ]
+    ],
+    "tags": [
+      "read-heavy",
+      "real-time",
+      "low-latency",
+      "geo-distributed",
+      "high-availability"
+    ],
+    "core_challenge": "Designing a scalable and personalized news feed system that can handle hundreds of millions of users and provide near real-time updates with ranked posts",
+    "scale_tiers": {
+      "easy": {
+        "daily_active_users": "10M",
+        "reads_per_day": "1B",
+        "peak_qps": "50K/sec",
+        "data_volume": "100TB",
+        "latency_slo": "p99 < 1s"
+      },
+      "medium": {
+        "daily_active_users": "100M",
+        "reads_per_day": "10B",
+        "peak_qps": "500K/sec",
+        "data_volume": "1PB",
+        "latency_slo": "p99 < 200ms"
+      },
+      "hard": {
+        "daily_active_users": "500M",
+        "reads_per_day": "50B",
+        "peak_qps": "2M/sec",
+        "data_volume": "5PB",
+        "latency_slo": "p99 < 50ms"
+      }
+    }
   },
   {
     "id": "sd-google-drive",
@@ -19278,7 +19604,41 @@
       "CDN",
       "load balancer",
       "conflict resolution engine"
-    ]
+    ],
+    "tags": [
+      "storage-heavy",
+      "geo-distributed",
+      "high-availability",
+      "strong-consistency",
+      "low-latency"
+    ],
+    "core_challenge": "Designing a scalable and efficient file sync service that can handle large files, versioning, sharing, and offline-first sync while resolving conflicts and ensuring strong consistency across all devices",
+    "scale_tiers": {
+      "easy": {
+        "daily_active_users": "10M",
+        "writes_per_day": "100K",
+        "reads_per_day": "1M",
+        "peak_qps": "1K/sec",
+        "data_volume": "100TB",
+        "latency_slo": "p99 < 1s"
+      },
+      "medium": {
+        "daily_active_users": "50M",
+        "writes_per_day": "1M",
+        "reads_per_day": "10M",
+        "peak_qps": "10K/sec",
+        "data_volume": "1PB",
+        "latency_slo": "p99 < 200ms"
+      },
+      "hard": {
+        "daily_active_users": "100M",
+        "writes_per_day": "10M",
+        "reads_per_day": "100M",
+        "peak_qps": "100K/sec",
+        "data_volume": "10PB",
+        "latency_slo": "p99 < 50ms"
+      }
+    }
   },
   {
     "id": "sd-youtube",
@@ -19307,7 +19667,38 @@
       "recommendation engine",
       "load balancer",
       "message queue"
-    ]
+    ],
+    "tags": [
+      "read-heavy",
+      "media-processing",
+      "low-latency",
+      "high-availability",
+      "storage-heavy"
+    ],
+    "core_challenge": "Designing a system that can handle billions of views per day while maintaining low latency and high availability for video streaming, search, and recommendations.",
+    "scale_tiers": {
+      "easy": {
+        "writes_per_day": "10M",
+        "reads_per_day": "100M",
+        "peak_qps": "5K/sec",
+        "data_volume": "1PB",
+        "latency_slo": "p99 < 500ms"
+      },
+      "medium": {
+        "writes_per_day": "50M",
+        "reads_per_day": "500M",
+        "peak_qps": "20K/sec",
+        "data_volume": "10PB",
+        "latency_slo": "p99 < 200ms"
+      },
+      "hard": {
+        "writes_per_day": "300M",
+        "reads_per_day": "2B",
+        "peak_qps": "100K/sec",
+        "data_volume": "100PB",
+        "latency_slo": "p99 < 50ms"
+      }
+    }
   },
   {
     "id": "sd-notification-system",
@@ -19336,7 +19727,39 @@
       "user preferences store",
       "retry and dead-letter queue",
       "analytics store"
-    ]
+    ],
+    "tags": [
+      "low-latency",
+      "geo-distributed",
+      "high-availability",
+      "strong-consistency",
+      "fan-out",
+      "push-notifications"
+    ],
+    "core_challenge": "Designing a scalable notification system that can handle multiple channels, providers, and user preferences while ensuring at-least-once delivery and deduplication.",
+    "scale_tiers": {
+      "easy": {
+        "writes_per_day": "10M",
+        "reads_per_day": "1M",
+        "peak_qps": "1K/sec",
+        "data_volume": "100GB",
+        "latency_slo": "p99 < 30s"
+      },
+      "medium": {
+        "writes_per_day": "100M",
+        "reads_per_day": "10M",
+        "peak_qps": "10K/sec",
+        "data_volume": "1TB",
+        "latency_slo": "p99 < 10s"
+      },
+      "hard": {
+        "writes_per_day": "1B",
+        "reads_per_day": "100M",
+        "peak_qps": "100K/sec",
+        "data_volume": "10TB",
+        "latency_slo": "p99 < 1s"
+      }
+    }
   },
   {
     "id": "sd-typeahead",
@@ -19363,7 +19786,32 @@
       "data pipeline (aggregator)",
       "frequency store (database)",
       "CDN for prefetched results"
-    ]
+    ],
+    "tags": [
+      "read-heavy",
+      "real-time",
+      "low-latency",
+      "search-indexing",
+      "caching"
+    ],
+    "core_challenge": "Designing a system that can handle billions of queries per day while providing real-time suggestions based on recent search trends within a tight latency constraint",
+    "scale_tiers": {
+      "easy": {
+        "reads_per_day": "100M",
+        "peak_qps": "1K/sec",
+        "latency_slo": "p99 < 200ms"
+      },
+      "medium": {
+        "reads_per_day": "10B",
+        "peak_qps": "100K/sec",
+        "latency_slo": "p99 < 100ms"
+      },
+      "hard": {
+        "reads_per_day": "100B",
+        "peak_qps": "1M/sec",
+        "latency_slo": "p99 < 50ms"
+      }
+    }
   },
   {
     "id": "sd-stock-exchange",
@@ -19391,7 +19839,32 @@
       "market data publisher",
       "persistent journal",
       "risk check service"
-    ]
+    ],
+    "tags": [
+      "real-time",
+      "low-latency",
+      "high-availability",
+      "strong-consistency",
+      "durability-critical"
+    ],
+    "core_challenge": "Designing a system that can process a high volume of orders in real-time while maintaining determinism, fairness, and consistency across all components",
+    "scale_tiers": {
+      "easy": {
+        "peak_qps": "10K/sec",
+        "data_volume": "100GB",
+        "latency_slo": "p99 < 200ms"
+      },
+      "medium": {
+        "peak_qps": "100K/sec",
+        "data_volume": "1TB",
+        "latency_slo": "p99 < 100ms"
+      },
+      "hard": {
+        "peak_qps": "1M/sec",
+        "data_volume": "10TB",
+        "latency_slo": "p99 < 50ms"
+      }
+    }
   },
   {
     "id": "sd-proximity-service",
@@ -19418,7 +19891,35 @@
       "search service",
       "CDN",
       "load balancer"
-    ]
+    ],
+    "tags": [
+      "read-heavy",
+      "geo-distributed",
+      "low-latency",
+      "search-indexing",
+      "caching"
+    ],
+    "core_challenge": "The system must efficiently handle a large volume of queries while maintaining low latency and supporting complex filtering and ranking operations.",
+    "scale_tiers": {
+      "easy": {
+        "reads_per_day": "10M",
+        "peak_qps": "100K/sec",
+        "data_volume": "100GB",
+        "latency_slo": "p99 < 500ms"
+      },
+      "medium": {
+        "reads_per_day": "100M",
+        "peak_qps": "1M/sec",
+        "data_volume": "1TB",
+        "latency_slo": "p99 < 200ms"
+      },
+      "hard": {
+        "reads_per_day": "1B",
+        "peak_qps": "10M/sec",
+        "data_volume": "10TB",
+        "latency_slo": "p99 < 50ms"
+      }
+    }
   },
   {
     "id": "sd-payment-system",
@@ -19447,7 +19948,38 @@
       "fraud detection service",
       "event bus",
       "reconciliation worker"
-    ]
+    ],
+    "tags": [
+      "low-latency",
+      "high-availability",
+      "strong-consistency",
+      "idempotency",
+      "durability-critical"
+    ],
+    "core_challenge": "Ensuring exactly-once payment processing while maintaining high availability and low latency in a system handling millions of transactions per day",
+    "scale_tiers": {
+      "easy": {
+        "writes_per_day": "100K",
+        "reads_per_day": "500K",
+        "peak_qps": "50/sec",
+        "data_volume": "10GB",
+        "latency_slo": "p99 < 1s"
+      },
+      "medium": {
+        "writes_per_day": "1M",
+        "reads_per_day": "5M",
+        "peak_qps": "500/sec",
+        "data_volume": "100GB",
+        "latency_slo": "p99 < 200ms"
+      },
+      "hard": {
+        "writes_per_day": "10M",
+        "reads_per_day": "50M",
+        "peak_qps": "5K/sec",
+        "data_volume": "1TB",
+        "latency_slo": "p99 < 50ms"
+      }
+    }
   },
   {
     "id": "sd-hotel-booking",
@@ -19475,7 +20007,38 @@
       "payment integration",
       "notification service",
       "load balancer"
-    ]
+    ],
+    "tags": [
+      "read-heavy",
+      "low-latency",
+      "high-availability",
+      "strong-consistency",
+      "caching"
+    ],
+    "core_challenge": "Preventing double-booking while handling high traffic and ensuring strong consistency across the system",
+    "scale_tiers": {
+      "easy": {
+        "daily_active_users": "100K",
+        "reads_per_day": "200K",
+        "writes_per_day": "20K",
+        "peak_qps": "500/sec",
+        "latency_slo": "p99 < 500ms"
+      },
+      "medium": {
+        "daily_active_users": "1M",
+        "reads_per_day": "1M",
+        "writes_per_day": "100K",
+        "peak_qps": "2K/sec",
+        "latency_slo": "p99 < 200ms"
+      },
+      "hard": {
+        "daily_active_users": "10M",
+        "reads_per_day": "10M",
+        "writes_per_day": "1M",
+        "peak_qps": "10K/sec",
+        "latency_slo": "p99 < 50ms"
+      }
+    }
   },
   {
     "id": "sd-metrics-monitoring",
@@ -19504,6 +20067,31 @@
       "alerting service",
       "notification gateway",
       "dashboard frontend"
-    ]
+    ],
+    "tags": [
+      "time-series",
+      "low-latency",
+      "high-availability",
+      "storage-heavy",
+      "real-time"
+    ],
+    "core_challenge": "Designing a scalable and efficient system to handle high-volume time-series data ingestion, storage, and querying while meeting strict latency requirements",
+    "scale_tiers": {
+      "easy": {
+        "peak_qps": "10K/sec",
+        "data_volume": "100GB",
+        "latency_slo": "p99 < 2000ms"
+      },
+      "medium": {
+        "peak_qps": "100K/sec",
+        "data_volume": "1TB",
+        "latency_slo": "p99 < 1500ms"
+      },
+      "hard": {
+        "peak_qps": "1M/sec",
+        "data_volume": "10TB",
+        "latency_slo": "p99 < 1000ms"
+      }
+    }
   }
 ]

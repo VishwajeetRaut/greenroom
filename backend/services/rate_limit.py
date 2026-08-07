@@ -18,6 +18,8 @@ credentials.
 
 from __future__ import annotations
 
+import os
+import random
 import time
 from collections import defaultdict, deque
 from threading import Lock
@@ -26,6 +28,7 @@ from fastapi import HTTPException, status
 
 _WINDOW_SECONDS = 60
 _PRUNE_AFTER_SECONDS = 300
+_PRUNE_PROBABILITY = float(os.environ.get("RATE_LIMIT_PRUNE_PROBABILITY", "0.02"))
 
 
 def check_rate_limit(key: str, max_per_minute: int = 30) -> None:
@@ -74,11 +77,21 @@ def _check_postgres(sb, key: str, max_per_minute: int) -> None:
     # Record this request
     sb.table("rate_limit_events").insert({"user_id": key, "ts": now.isoformat()}).execute()
 
-    # Prune old rows (fire-and-forget; failure is acceptable)
-    try:
-        sb.table("rate_limit_events").delete().lt("ts", prune_before.isoformat()).execute()
-    except Exception:
-        pass
+    # Prune old rows — but not on every request.
+    #
+    # This DELETE is unscoped: it sweeps rows for ALL users, so running it per
+    # request meant every single call did a table-wide write. Under load that
+    # is a lock-contention hotspot, and it made the rate limiter (which fires
+    # on every endpoint) cost three round-trips instead of two.
+    #
+    # Sampling it is enough: rows only need removing eventually, and at any
+    # real request rate 1-in-N still fires many times a minute. Random rather
+    # than a timer so multiple replicas don't synchronise on the same instant.
+    if random.random() < _PRUNE_PROBABILITY:
+        try:
+            sb.table("rate_limit_events").delete().lt("ts", prune_before.isoformat()).execute()
+        except Exception:
+            pass
 
 
 # ── In-memory fallback (local dev only) ──────────────────────────────────────

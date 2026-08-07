@@ -280,21 +280,50 @@ exactly why Greenroom's sandbox-verification step exists.
 | Cross-user session access blocked | Yes (`check_ownership`, 403) | None |
 | One-problem containment (technical/system-design) | Yes — guardrail-enforced | None |
 
-## 7. Operational metrics — not yet measurable
+~~**Not yet measurable at scale** — no logged event records when the
+guardrail's regex/LLM-judge layer fires versus when a response passes clean.~~
+The mechanism exists and was extended this week (candidate-requested
+question-switching had to be taught to bypass the "no second problem" rule
+specifically, confirmed via targeted phrase testing — "next DSA question",
+"can i have next dsa question", etc. all correctly trigger it; "i have typed
+in my solution" correctly does not).
 
-These need instrumentation that doesn't exist yet, listed honestly rather
-than estimated:
+**Measurable 2026-08-06:** `greenroom_guardrail_checks_total{track,layer,result}`
+records every check per layer, so the regex and LLM-judge trigger rates are
+now separable — which matters, because the two catching different things is
+the whole argument for having both. The `safe_fallback` layer is the one to
+watch: reaching it means the model leaked *and* failed to correct itself, so
+the candidate got a canned question. See `infra/observability/`.
 
-- **P50/P95 response latency** — `structlog` logs latency per request to
-  stdout only; nothing is persisted anywhere aggregatable yet.
-- **LLM fallback rate** (Groq → Ollama) — not currently logged as a
-  countable event. (Known qualitatively: Groq hit its daily token quota
-  during this week's work, confirmed directly.)
-- **Cost per completed session** — no token-usage tracking wired up.
-- **Piston vs Wandbox execution split** — logged per-request but not
-  aggregated anywhere queryable; the self-hosted Piston sandbox has been
-  unreachable for the entirety of this week's local testing, with every
-  real execution falling through to Wandbox.
+## 7. Operational metrics
+
+All four items below were listed as *not yet measurable* on 2026-07-29. All
+four are now instrumented — they had failed for the same reason, which is that
+the data existed but only as a line of JSON on stdout that nothing aggregated.
+Struck through with what replaced them:
+
+- ~~**P50/P95 response latency** — logs latency to stdout only; nothing
+  aggregatable.~~ **Measurable 2026-08-06:**
+  `greenroom_http_request_duration_seconds`, by route template.
+- ~~**LLM fallback rate** (Groq → Ollama) — not logged as a countable
+  event.~~ **Measurable 2026-08-06:** `greenroom_llm_calls_total{provider}`
+  and `greenroom_llm_fallback_total`, with a sustained-fallback alert. The
+  daily-quota exhaustion is now a measured number rather than an anecdote —
+  the free tier is 100,000 tokens/day, and one oversized evaluation was
+  requesting 55,467 of them.
+- ~~**Cost per completed session** — no token-usage tracking wired up.~~
+  **Measured 2026-08-06: ~$0.0086 per completed session** on
+  `llama-3.3-70b-versatile`. `services/token_meter.py` now records
+  provider-reported token counts per call site, and
+  `scripts/benchmark_models.py` benchmarks candidate models against the real
+  production prompts. 61% of that cost is the per-turn interviewer call, whose
+  input grows with the transcript. Full breakdown, model comparison, and the
+  pricing caveat: [MODEL_COST_MATRIX.md](./MODEL_COST_MATRIX.md).
+- ~~**Piston vs Wandbox execution split** — logged per-request but not
+  aggregated anywhere queryable.~~ **Measurable 2026-08-06:**
+  `greenroom_sandbox_runs_total{backend}`, with an alert for the case
+  described here (everything silently falling through to a public third
+  party).
 
 ## What to build next, in order of cheapest-to-answer
 

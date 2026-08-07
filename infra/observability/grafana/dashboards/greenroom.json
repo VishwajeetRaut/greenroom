@@ -1,0 +1,344 @@
+{
+  "uid": "greenroom-overview",
+  "title": "Greenroom \u2014 Overview",
+  "description": "Panels are ordered by what actually goes wrong. The first row is the four things docs/EVALUATION_METRICS.md listed as 'not yet measurable' \u2014 evaluation failures, LLM fallback rate, sandbox backend split, and guardrail trigger rate. Provisioned from infra/observability/grafana/dashboards/greenroom.json.",
+  "tags": [
+    "greenroom"
+  ],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "refresh": "30s",
+  "time": {
+    "from": "now-6h",
+    "to": "now"
+  },
+  "panels": [
+    {
+      "type": "row",
+      "title": "Silent failures \u2014 invisible to the candidate, ruinous to the session",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 0
+      }
+    },
+    {
+      "type": "stat",
+      "title": "Evaluations returning the placeholder report",
+      "description": "Both LLM providers failed and the candidate got 'Could not generate a detailed report' after finishing a whole interview. The single worst outcome in the app.",
+      "gridPos": {
+        "h": 6,
+        "w": 6,
+        "x": 0,
+        "y": 1
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "greenroom-prom"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(increase(greenroom_evaluations_total{path=\"defaulted\"}[$__range])) / clamp_min(sum(increase(greenroom_evaluations_total[$__range])), 1)",
+          "legendFormat": "defaulted"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 0.02
+              },
+              {
+                "color": "red",
+                "value": 0.1
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "LLM provider split (Groq \u2192 Ollama fallback rate)",
+      "description": "EVALUATION_METRICS.md \u00a77: 'not currently logged as a countable event'. Sustained fallback means Groq's daily quota is gone or it's 5xxing.",
+      "gridPos": {
+        "h": 6,
+        "w": 9,
+        "x": 6,
+        "y": 1
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "greenroom-prom"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (provider) (rate(greenroom_llm_calls_total[5m]))",
+          "legendFormat": "{{provider}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps"
+        }
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Sandbox backend split (Judge0 \u2192 RapidAPI \u2192 local)",
+      "description": "EVALUATION_METRICS.md \u00a77: 'logged per-request but not aggregated anywhere queryable'. Three tiers: judge0_public \u2192 judge0_rapidapi \u2192 subprocess. The last one runs candidate code inside the backend container with no sandbox isolation \u2014 it is a bridge during an outage, not a steady state, so any sustained share of it is worth acting on.",
+      "gridPos": {
+        "h": 6,
+        "w": 9,
+        "x": 15,
+        "y": 1
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "greenroom-prom"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (backend) (rate(greenroom_sandbox_runs_total[5m]))",
+          "legendFormat": "{{backend}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps"
+        }
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Guardrail triggers by layer",
+      "description": "EVALUATION_METRICS.md \u00a76: 'needs a logged trigger event, which doesn't exist yet'. Per-layer, because the regex and the LLM judge catching different things is the whole argument for having both. 'safe_fallback' is the alarming one \u2014 the model leaked AND failed to correct itself, so the candidate got a canned question.",
+      "gridPos": {
+        "h": 7,
+        "w": 12,
+        "x": 0,
+        "y": 7
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "greenroom-prom"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (layer) (rate(greenroom_guardrail_checks_total{result=\"triggered\"}[10m]))",
+          "legendFormat": "{{layer}} triggered"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Evaluation path",
+      "description": "single_pass = transcript fit in one call. chunked = it was too large and went map-reduce. defaulted = both providers failed.",
+      "gridPos": {
+        "h": 7,
+        "w": 12,
+        "x": 12,
+        "y": 7
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "greenroom-prom"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (path) (increase(greenroom_evaluations_total[10m]))",
+          "legendFormat": "{{path}}"
+        }
+      ]
+    },
+    {
+      "type": "row",
+      "title": "Traffic and latency",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 14
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Request latency P50 / P95 by route",
+      "description": "EVALUATION_METRICS.md \u00a77: latency was logged to stdout only, with nothing aggregating it. Buckets go to 60s because an evaluation can legitimately take 20s+.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 15
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "greenroom-prom"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "histogram_quantile(0.95, sum by (le, route) (rate(greenroom_http_request_duration_seconds_bucket[5m])))",
+          "legendFormat": "P95 {{route}}"
+        },
+        {
+          "refId": "B",
+          "expr": "histogram_quantile(0.50, sum by (le, route) (rate(greenroom_http_request_duration_seconds_bucket[5m])))",
+          "legendFormat": "P50 {{route}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s"
+        }
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Requests by status",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 15
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "greenroom-prom"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (status) (rate(greenroom_http_requests_total[5m]))",
+          "legendFormat": "{{status}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps"
+        }
+      }
+    },
+    {
+      "type": "row",
+      "title": "Cost and cache",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 23
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Tokens by call site",
+      "description": "Provider-reported, not estimated. The per-turn interviewer call is ~61% of session cost \u2014 see docs/MODEL_COST_MATRIX.md.",
+      "gridPos": {
+        "h": 7,
+        "w": 8,
+        "x": 0,
+        "y": 24
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "greenroom-prom"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (call_site) (rate(greenroom_llm_tokens_total[10m]))",
+          "legendFormat": "{{call_site}}"
+        }
+      ]
+    },
+    {
+      "type": "stat",
+      "title": "Spend in range",
+      "description": "Token counts are exact; the $/token rate is indicative \u2014 see services/token_meter.py PRICING.",
+      "gridPos": {
+        "h": 7,
+        "w": 4,
+        "x": 8,
+        "y": 24
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "greenroom-prom"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(increase(greenroom_llm_cost_usd_total[$__range]))",
+          "legendFormat": "USD"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "currencyUSD",
+          "decimals": 4
+        }
+      }
+    },
+    {
+      "type": "stat",
+      "title": "LLM cache hit rate",
+      "gridPos": {
+        "h": 7,
+        "w": 4,
+        "x": 12,
+        "y": 24
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "greenroom-prom"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(increase(greenroom_llm_cache_lookups_total{result=\"hit\"}[$__range])) / clamp_min(sum(increase(greenroom_llm_cache_lookups_total[$__range])), 1)",
+          "legendFormat": "hit rate"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit"
+        }
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Sessions started by track",
+      "gridPos": {
+        "h": 7,
+        "w": 8,
+        "x": 16,
+        "y": 24
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "greenroom-prom"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (track) (increase(greenroom_sessions_total[30m]))",
+          "legendFormat": "{{track}}"
+        }
+      ]
+    }
+  ]
+}
