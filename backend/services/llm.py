@@ -24,7 +24,7 @@ from langchain_groq import ChatGroq
 from langchain_openai import AzureChatOpenAI
 from pydantic import BaseModel, Field
 
-from services import guardrail
+from services import guardrail, llm_cache
 from services.logger import log
 
 # ── env ──────────────────────────────────────────────────────────────────────
@@ -46,6 +46,10 @@ AZURE_OPENAI_API_KEY    = os.environ.get("AZURE_OPENAI_API_KEY", "")
 AZURE_OPENAI_ENDPOINT   = os.environ.get("AZURE_OPENAI_ENDPOINT", "")
 AZURE_OPENAI_DEPLOYMENT = os.environ.get("AZURE_OPENAI_DEPLOYMENT", "gpt-5-mini")
 AZURE_OPENAI_API_VERSION = os.environ.get("AZURE_OPENAI_API_VERSION", "2024-12-01-preview")
+
+# How many distinct opening greetings to keep per (track, role) before serving
+# them from cache instead of generating a new one. See opening_message.
+OPENING_POOL_SIZE = int(os.environ.get("LLM_OPENING_POOL_SIZE", "5"))
 
 
 # ── Pydantic schemas for structured evaluation output ────────────────────────
@@ -293,7 +297,26 @@ def _history_to_lc(history: list[dict]) -> list:
 # ── Public API ────────────────────────────────────────────────────────────────
 
 def opening_message(track: str, role: str) -> str:
-    """LLM-generated warm greeting that opens the interview session."""
+    """LLM-generated warm greeting that opens the interview session.
+
+    Cached as a variant POOL rather than a single response: the inputs
+    (track, role) take only a handful of distinct values across the whole
+    product, so without caching every session start pays for a greeting that
+    is near-identical to one already generated. Collapsing it to one cached
+    string would make every candidate hear the exact same sentence forever,
+    so the first OPENING_POOL_SIZE sessions per (track, role) generate and
+    fill the pool, and every session after that is served free from it.
+    """
+    return llm_cache.pooled_call(
+        "llm.opening",
+        (track, role, GROQ_MODEL),
+        lambda: _opening_message_uncached(track, role),
+        pool_size=OPENING_POOL_SIZE,
+        prompt_chars=len(OPENING_SYSTEM_PROMPT.format(track=track, role=role)),
+    )
+
+
+def _opening_message_uncached(track: str, role: str) -> str:
     import time
     system = OPENING_SYSTEM_PROMPT.format(track=track, role=role)
     start = time.monotonic()

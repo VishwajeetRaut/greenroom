@@ -205,6 +205,18 @@ When a system-design session ends, `llm.evaluate_diagram()` scores the candidate
 
 `evaluate_session()` runs a second LLM pass after the draft score and feedback are generated: a reviewer persona checks the draft against the transcript and corrects it where the score doesn't match the written feedback, the feedback reads as generic filler, or the transcript has evidence the first pass missed. If the draft already holds up, the reviewer is instructed to leave it unchanged rather than edit for its own sake. The pass is best-effort — any failure (bad JSON, LLM error) just falls back to the original draft, so it can never turn a working evaluation into a broken one, and it's controlled by `EVAL_SELF_CRITIQUE_ENABLED` so it can be switched off without a code change if it adds latency or cost that isn't worth it.
 
+### Content-addressed response cache for repeated LLM calls
+
+The durable, expensive artefacts — generated harnesses, signatures, and questions — were already cached in Supabase. What wasn't cached was the per-interaction traffic that repeats *within* a single coding interview.
+
+The dominant case: the dynamic test runner's LLM case generator (`test_runner._generate_cases`) fired on **every** "Run tests" click for a problem the interviewer invented on its own. A candidate clicks Run tests 5-20 times against one problem in a session, and each click re-sent the full problem statement and re-generated the same six cases at temperature 0.1 — the same request, billed every time. `services/llm_cache.py` keys the response on a SHA-256 of the prompt inputs, so those N calls collapse to 1.
+
+The opening greeting (`llm.opening_message`) is the second case: its only inputs are `(track, role)`, a handful of distinct values across the whole product, yet it was generated fresh at every session start. Collapsing it to one cached string would make every candidate hear the identical sentence forever, so it uses a **variant pool** instead — the first `LLM_OPENING_POOL_SIZE` sessions per `(track, role)` generate and fill the pool, and every session after that is served free from it at random, preserving the variety the temperature-0.9 call was there to provide.
+
+The cache is in-process and bounded (LRU + TTL), deliberately matching the durability characteristics of `session_store` rather than introducing new infrastructure — it resets on restart and is per-replica, which is acceptable because a cache miss is only ever a cost, never a correctness problem. A falsy result (failed generation, unparseable JSON) is **not** cached: that's transient, and the next click should get a real attempt rather than a pinned failure for the whole TTL. Durable negative results stay where they belong, in `harness_generator._UNSUPPORTED_MARKER`.
+
+Each entry records the prompt and response sizes it stands in for, so `GET /api/analytics/llm-cache` reports a measured saving rather than an estimate — those counters are the input to the model cost comparison.
+
 ---
 
 ## 4. Scope
@@ -356,6 +368,10 @@ JUDGE0_PUBLIC_URL=https://ce.judge0.com          # Default shown
 JUDGE0_RAPIDAPI_URL=https://judge0-ce.p.rapidapi.com  # Default shown
 JUDGE0_RAPIDAPI_KEY=                             # Optional — https://rapidapi.com/judge0-official/api/judge0-ce
 JUDGE0_RAPIDAPI_HOST=judge0-ce.p.rapidapi.com    # Default shown
+LLM_CACHE_ENABLED=true                 # Default: true
+LLM_CACHE_TTL_SECONDS=86400            # Default: 86400 (24h)
+LLM_CACHE_MAX_ENTRIES=512              # Default: 512
+LLM_OPENING_POOL_SIZE=5                # Default: 5
 ```
 
 **Frontend:**
@@ -432,6 +448,7 @@ backend/
     test_runner.py           # call/expected and stdin/stdout test modes, harness injection; _add_js_new_keywords() fixes JS class-instantiation syntax
     harness_generator.py     # Java/C++ harness + Python/JS signature generation: dataset-first (deterministic driver, no LLM), LLM+sandbox-verify as fallback, negative-cached once exhausted
     guardrail.py             # 4-layer answer-leak prevention: prompt + regex + regeneration + fallback
+    llm_cache.py             # Content-addressed TTL+LRU cache for repeated LLM calls (test-case generation, opening greeting) with measured token-saving counters
     supabase_client.py       # Singleton Supabase client using service-role key
     logger.py                # structlog JSON logger
     retry.py                 # Exponential-backoff retry decorator
@@ -590,6 +607,7 @@ analytics_events (
 |---|---|---|
 | `POST` | `/api/analytics/event` | Fire-and-forget usage/click event. Persists in the background via `BackgroundTasks`; always returns 202 immediately regardless of whether the write succeeds. |
 | `GET` | `/api/analytics/stats` | Aggregated telemetry for the in-app dashboard: session counts, average scores overall/per-track, completion rates, 14-day activity, language usage, score distribution. |
+| `GET` | `/api/analytics/llm-cache` | LLM response cache counters: hits, misses, hit rate, entries, evictions, and measured prompt/completion tokens saved. Aggregate and in-process only — no prompts, responses, or per-user data; resets on restart. |
 
 ### Health
 

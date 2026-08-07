@@ -4,6 +4,7 @@ from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 
 from auth import AuthenticatedUser, get_current_user
 from models import AnalyticsEventRequest
+from services import llm_cache
 from services.persistence import persist_analytics_event
 from services.rate_limit import check_rate_limit
 from services.supabase_client import get_supabase
@@ -22,6 +23,18 @@ async def track_event(
         persist_analytics_event, user.id, req.session_id, req.event, req.properties,
     )
     return {"status": "accepted"}
+
+
+@router.get("/llm-cache")
+async def get_llm_cache_stats(user: AuthenticatedUser = Depends(get_current_user)):
+    """Operational counters for the LLM response cache (services.llm_cache).
+
+    Aggregate only — no prompts, responses, or per-user data. The
+    est_*_tokens_saved figures are measured against the actual prompt and
+    response sizes each cached entry stands in for, so they're the input to
+    the model cost comparison rather than a guess. In-process counters, so
+    they reset on restart and are per-replica."""
+    return llm_cache.stats()
 
 
 @router.get("/stats")
