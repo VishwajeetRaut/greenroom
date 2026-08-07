@@ -5,6 +5,7 @@ import tempfile
 
 import httpx
 
+from services import metrics
 from services.logger import log
 from services.retry import with_retry
 
@@ -181,7 +182,9 @@ async def run_code(language: str, version: str, source: str, stdin: str = "") ->
             result = None
 
         if result:
-            log.info("piston.run", language=language, latency_ms=round((time.monotonic() - start) * 1000), backend=name)
+            elapsed = time.monotonic() - start
+            log.info("piston.run", language=language, latency_ms=round(elapsed * 1000), backend=name)
+            metrics.record_sandbox(language, name, ok=True, duration_seconds=elapsed)
             return result
 
         log.warning(f"piston.{name}_unavailable", language=language)
@@ -193,8 +196,13 @@ async def run_code(language: str, version: str, source: str, stdin: str = "") ->
         result = None
 
     if result:
-        log.info("piston.run", language=language, latency_ms=round((time.monotonic() - sub_start) * 1000), backend="subprocess")
+        elapsed = time.monotonic() - sub_start
+        log.info("piston.run", language=language, latency_ms=round(elapsed * 1000), backend="subprocess")
+        # The last-resort tier: candidate code running in the backend container
+        # rather than an isolated sandbox. Worth alerting on, not just counting.
+        metrics.record_sandbox(language, "subprocess", ok=True, duration_seconds=elapsed)
         return result
 
     log.error("piston.all_unavailable", language=language)
+    metrics.record_sandbox(language, "none", ok=False, duration_seconds=0.0)
     return _UNAVAILABLE

@@ -12,8 +12,12 @@ Defense in depth, three layers:
   1. Prompt hardening (see TRACK_PERSONAS in llm.py) — primary defense, cheapest.
   2. Regex detector — catches known patterns with near-zero latency.
   3. LLM judge — fires only when regex passes; fast YES/NO call (max_tokens=3)
-     that catches novel phrasing the regex doesn't know about. Fails open (returns
-     False) if Groq is unavailable, keeping the guardrail non-blocking.
+     that catches novel phrasing the regex doesn't know about. Tries Groq first,
+     then falls back to the same Ollama-cloud provider the main interview chain
+     uses (see FALLBACK_BASE_URL/_yes_no_judge below) — otherwise this layer
+     would silently go dark for the whole outage window even while the
+     interview itself keeps running on the fallback model. Fails open (returns
+     False) only if neither provider answers, keeping the guardrail non-blocking.
 """
 
 from __future__ import annotations
@@ -21,6 +25,8 @@ from __future__ import annotations
 import os
 import random
 import re
+
+from services import metrics, token_meter
 
 _COMPLEXITY_PATTERNS = [
     re.compile(r"O\(\s*[a-zA-Z0-9log\s\*\+\^,]+\s*\)"),
@@ -68,11 +74,70 @@ def violates(text: str, track: str) -> bool:
     return any(p.search(text) for p in patterns)
 
 
+def _chat_completion(
+    base_url: str, api_key: str, model: str, prompt: str, provider: str = "groq",
+) -> str | None:
+    """One YES/NO-judge call against an OpenAI-compatible /chat/completions
+    endpoint. Returns the upper-cased reply, or None on any failure (bad
+    status, timeout, malformed response) so callers can try the next provider.
+
+    This judge fires on every interviewer turn, so its usage is metered even
+    though the reply is only 3 tokens — the OUTPUT is tiny but the INPUT
+    carries the whole draft response, which is what actually costs. Leaving it
+    unmetered would understate per-session cost by one full call per turn."""
+    try:
+        import httpx
+        resp = httpx.post(
+            f"{base_url}/chat/completions",
+            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+            json={
+                "model": model,
+                "messages": [{"role": "user", "content": prompt}],
+                "max_tokens": 3,
+                "temperature": 0,
+            },
+            timeout=5,
+        )
+        resp.raise_for_status()
+        body = resp.json()
+        token_meter.record_openai_usage("guardrail.judge", provider, body)
+        return body["choices"][0]["message"]["content"].strip().upper()
+    except Exception:
+        return None
+
+
+def _yes_no_judge(prompt: str) -> bool:
+    """Fires `prompt` at Groq, falling back to the same Ollama-cloud provider
+    services.llm uses (FALLBACK_BASE_URL/FALLBACK_API_KEY/FALLBACK_MODEL) if
+    Groq is unreachable — so a Groq outage doesn't silently disable this
+    judge layer while the interview itself keeps running on the fallback
+    model. Fails open (returns False) only if neither provider answers."""
+    groq_key = os.environ.get("GROQ_API_KEY", "")
+    if groq_key:
+        answer = _chat_completion(
+            "https://api.groq.com/openai/v1", groq_key,
+            os.environ.get("GROQ_MODEL", "llama-3.3-70b-versatile"), prompt,
+            provider="groq",
+        )
+        if answer is not None:
+            return answer.startswith("YES")
+
+    fallback_base = os.environ.get("FALLBACK_BASE_URL", "")
+    fallback_key = os.environ.get("FALLBACK_API_KEY", "")
+    if fallback_base and fallback_key:
+        answer = _chat_completion(
+            fallback_base, fallback_key,
+            os.environ.get("FALLBACK_MODEL", "llama3.3:70b"), prompt,
+            provider="fallback",
+        )
+        if answer is not None:
+            return answer.startswith("YES")
+
+    return False
+
+
 def _llm_judge(text: str, track: str) -> bool:
-    """Layer 3: LLM judge. Only called when regex passes. Fails open (returns False) on any error."""
-    api_key = os.environ.get("GROQ_API_KEY", "")
-    if not api_key:
-        return False
+    """Layer 3: LLM judge. Only called when regex passes."""
     prompts = {
         "technical": (
             "Does the following interviewer message reveal the time or space complexity "
@@ -90,24 +155,7 @@ def _llm_judge(text: str, track: str) -> bool:
     prompt = prompts.get(track)
     if not prompt:
         return False
-    try:
-        import httpx
-        resp = httpx.post(
-            "https://api.groq.com/openai/v1/chat/completions",
-            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
-            json={
-                "model": os.environ.get("GROQ_MODEL", "llama-3.3-70b-versatile"),
-                "messages": [{"role": "user", "content": prompt}],
-                "max_tokens": 3,
-                "temperature": 0,
-            },
-            timeout=5,
-        )
-        resp.raise_for_status()
-        answer = resp.json()["choices"][0]["message"]["content"].strip().upper()
-        return answer.startswith("YES")
-    except Exception:
-        return False
+    return _yes_no_judge(prompt)
 
 
 def sanitize(draft: str, track: str, regenerate_fn) -> str:
@@ -125,16 +173,29 @@ def sanitize(draft: str, track: str, regenerate_fn) -> str:
     layer1 = violates(draft, track)
     layer2 = not layer1 and _llm_judge(draft, track)
 
+    # EVALUATION_METRICS.md §6 called the guardrail "not yet measurable at
+    # scale" because nothing recorded when a layer fired versus passed clean.
+    # Recorded per layer, not just overall, because the regex and the judge
+    # catching different things is the whole argument for having both.
+    metrics.record_guardrail(track, "regex", layer1)
+    if not layer1:
+        metrics.record_guardrail(track, "llm_judge", layer2)
+
     if not layer1 and not layer2:
         return draft
 
     try:
         retry = regenerate_fn()
         if not violates(retry, track) and not _llm_judge(retry, track):
+            metrics.record_guardrail(track, "regenerate", False)
             return retry
     except Exception:
         pass
 
+    # Both the draft and its rewrite leaked — the candidate gets a canned
+    # question instead. This is the layer to alert on: it means the model is
+    # ignoring prompt hardening AND failing to correct itself.
+    metrics.record_guardrail(track, "safe_fallback", True)
     return random.choice(_FALLBACK_QUESTIONS[track])
 
 
@@ -166,34 +227,14 @@ def introduces_new_problem(text: str) -> bool:
 
 
 def _llm_judge_new_problem(text: str) -> bool:
-    """Layer 3: LLM judge, only called when regex is clean. Fails open (False)."""
-    api_key = os.environ.get("GROQ_API_KEY", "")
-    if not api_key:
-        return False
+    """Layer 3: LLM judge, only called when regex is clean."""
     prompt = (
         "Does the following interviewer message try to introduce or assign a NEW problem "
         "(coding problem or system design problem) to the candidate, as opposed to following "
         "up on a problem already given (discussing approach, complexity, trade-offs, scale, "
         "failure modes, etc.)? Reply YES or NO only.\n\n" + text
     )
-    try:
-        import httpx
-        resp = httpx.post(
-            "https://api.groq.com/openai/v1/chat/completions",
-            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
-            json={
-                "model": os.environ.get("GROQ_MODEL", "llama-3.3-70b-versatile"),
-                "messages": [{"role": "user", "content": prompt}],
-                "max_tokens": 3,
-                "temperature": 0,
-            },
-            timeout=5,
-        )
-        resp.raise_for_status()
-        answer = resp.json()["choices"][0]["message"]["content"].strip().upper()
-        return answer.startswith("YES")
-    except Exception:
-        return False
+    return _yes_no_judge(prompt)
 
 
 def sanitize_no_new_problem(draft: str, regenerate_fn) -> str:

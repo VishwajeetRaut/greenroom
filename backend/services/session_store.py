@@ -74,6 +74,10 @@ def get_session(session_id: str) -> dict | None:
         "assigned_question": assigned_question,
         "next_sequence_no": len(history),
         "last_activity_at": last_activity,
+        # Wall-clock cap is measured from here. Rebuilt from the row rather
+        # than reset to now(), or a replica restart would silently hand every
+        # in-flight session a fresh duration budget.
+        "started_at": row.get("created_at"),
         "status": row.get("status") or "active",
         "diagram_elements": row.get("diagram_elements") or [],
         # Only the current one is recoverable from a rebuild — full skip

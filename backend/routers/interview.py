@@ -23,7 +23,9 @@ from services import (
     adhoc_harness,
     guardrail,
     harness_generator,
+    jd_analyzer,
     llm,
+    metrics,
     piston,
     question_bank,
     question_generator,
@@ -42,7 +44,9 @@ from services.session_guard import (
     check_idle_timeout,
     check_ownership,
     check_session_limit,
+    is_duration_limit_reached,
     is_turn_limit_reached,
+    touch,
 )
 from services.session_store import SESSIONS, evict, get_session, now, session_lock
 from services.supabase_client import get_supabase
@@ -50,16 +54,43 @@ from services.supabase_client import get_supabase
 router = APIRouter(prefix="/interview", tags=["interview"])
 
 
+def _pick_jd_guided(picker, topics: list[str], role: str | None):
+    """Runs `picker` against the JD's topics in priority order, then unfiltered.
+
+    The widening matters: the bank's topic coverage is very uneven (3
+    system-design entries mention caching, 4 mention infrastructure), so a
+    strict filter would frequently return nothing. A JD must be able to steer
+    the choice but must never be able to leave the candidate with no question
+    at all — which is what returning None here would mean.
+
+    `role` is passed straight through so the picker's own seniority weighting
+    still applies. The JD contributes the TOPIC; difficulty stays with
+    question_bank, which skews it by inferred seniority — and the JD's analysed
+    role title is what `session["role"]` holds, so that inference already sees
+    the JD's seniority without this filtering on it too."""
+    for topic in topics:
+        picked = picker(topic=topic, role=role)
+        if picked:
+            return picked
+    return picker(role=role)
+
+
 def _question_context(assigned: dict) -> QuestionContext:
     is_stdio = bool(assigned.get("tests") and "stdin" in assigned["tests"][0])
+    # scale_tier is stamped onto the question at assignment time (see
+    # post_message); absent for tracks that don't carry scale metadata.
+    scale = question_bank.scale_for(assigned, assigned.get("scale_tier"))
     return QuestionContext(
         id=assigned["id"],
         title=assigned.get("title", ""),
-        difficulty=assigned.get("difficulty", ""),
+        difficulty=assigned.get("scale_tier") or assigned.get("difficulty", ""),
         prompt=assigned.get("prompt", ""),
         constraints=assigned.get("constraints") or [],
         examples=assigned.get("examples") or [],
         is_stdio=is_stdio,
+        tags=assigned.get("tags") or [],
+        core_challenge=assigned.get("core_challenge"),
+        scale=question_bank.format_scale(scale),
     )
 
 
@@ -69,17 +100,30 @@ async def start_session(req: StartSessionRequest, user: AuthenticatedUser = Depe
     check_session_limit(user.id)
 
     session_id = str(uuid.uuid4())
-    greeting = await run_in_threadpool(llm.opening_message, req.track, req.role)
+
+    # Analyse the pasted job description once, here, rather than re-reading raw
+    # JD text on every turn. The resulting role title replaces req.role for the
+    # whole session: req.role is the hardcoded "Software Engineer" default (the
+    # frontend sends that literal string), so before this the persona, question
+    # selection and evaluation were all written for a generic SWE no matter what
+    # the candidate pasted. Returns None on any failure, which restores exactly
+    # the previous behaviour.
+    jd_profile = await run_in_threadpool(jd_analyzer.analyze, req.job_description)
+    effective_role = (jd_profile or {}).get("role_title") or req.role
+
+    greeting = await run_in_threadpool(llm.opening_message, req.track, effective_role)
 
     SESSIONS[session_id] = {
         "track": req.track,
-        "role": req.role,
+        "role": effective_role,
         "history": [{"role": "interviewer", "content": greeting}],
         "user_id": user.id,
         "assigned_question": None,
         "next_sequence_no": 1,
         "last_activity_at": now(),
+        "started_at": now(),
         "job_description": req.job_description or None,
+        "jd_profile": jd_profile,
         "status": "active",
         "diagram_elements": [],
         "asked_question_ids": set(),
@@ -87,10 +131,11 @@ async def start_session(req: StartSessionRequest, user: AuthenticatedUser = Depe
     }
 
     await run_in_threadpool(
-        persist_session_start, session_id, user.id, req.track, req.role, greeting,
+        persist_session_start, session_id, user.id, req.track, effective_role, greeting,
         assigned_question_id=None,
     )
 
+    metrics.record_session(req.track, "started")
     return StartSessionResponse(session_id=session_id, track=req.track, question=greeting)
 
 
@@ -125,7 +170,10 @@ async def post_message(req: MessageRequest, user: AuthenticatedUser = Depends(ge
         check_ownership(session, user)
         check_idle_timeout(session)
 
-        if is_turn_limit_reached(session):
+        if is_turn_limit_reached(session) or is_duration_limit_reached(session):
+            # Graceful, not a 410: the candidate has a full interview's work in
+            # this session and must still be able to end it and collect their
+            # evaluation. Only an ABANDONED session (idle timeout) expires hard.
             return MessageResponse(
                 question="We've covered a lot of ground. Click 'End session' whenever you're ready for your scored evaluation.",
                 done=True,
@@ -166,17 +214,31 @@ async def post_message(req: MessageRequest, user: AuthenticatedUser = Depends(ge
 
         if is_first_reply:
             session["candidate_intro"] = req.message
+            jd_profile = session.get("jd_profile")
             if session["track"] == "technical":
                 session["assigned_question"] = await question_generator.select_or_generate_question(
-                    session["role"], candidate_intro=req.message,
+                    session["role"], candidate_intro=req.message, jd_profile=jd_profile,
                 )
             elif session["track"] == "system-design":
                 session["assigned_question"] = await run_in_threadpool(
-                    question_bank.pick_system_design_question, None, session["role"]
+                    _pick_jd_guided, question_bank.pick_system_design_question,
+                    jd_analyzer.topics_for_track(jd_profile, "system-design"),
+                    session["role"],
                 )
             else:
                 session["assigned_question"] = await run_in_threadpool(
-                    question_bank.pick_behavioral_question, None, None, session["role"]
+                    _pick_jd_guided, question_bank.pick_behavioral_question,
+                    jd_analyzer.topics_for_track(jd_profile, "behavioral"),
+                    session["role"],
+                )
+            if session["assigned_question"] and session["track"] == "system-design":
+                # Pose the chosen problem at the scale the JD implies, rather
+                # than only at whatever scale it was authored with. Copied
+                # first so a session can't mutate the shared bank entry.
+                session["assigned_question"] = dict(session["assigned_question"])
+                session["assigned_question"]["scale_tier"] = (
+                    jd_analyzer.scale_tier_for(jd_profile)
+                    or session["assigned_question"].get("difficulty")
                 )
             if session["assigned_question"]:
                 session.setdefault("asked_question_ids", set()).add(session["assigned_question"]["id"])
@@ -185,6 +247,7 @@ async def post_message(req: MessageRequest, user: AuthenticatedUser = Depends(ge
             exclude_ids = session.get("asked_question_ids") or set()
             new_question = await question_generator.select_or_generate_question(
                 session["role"], candidate_intro=session.get("candidate_intro", ""), exclude_ids=exclude_ids,
+                jd_profile=session.get("jd_profile"),
             )
             if new_question:
                 session["assigned_question"] = new_question
@@ -195,13 +258,13 @@ async def post_message(req: MessageRequest, user: AuthenticatedUser = Depends(ge
 
         question = await run_in_threadpool(
             llm.next_question, session["track"], session["role"], session["history"],
-            session.get("assigned_question"), session.get("job_description"), is_first_reply or wants_new_question,
+            session.get("assigned_question"), session.get("jd_profile"), is_first_reply or wants_new_question,
         )
 
         session["history"].append({"role": "interviewer", "content": question})
         await run_in_threadpool(persist_message, req.session_id, "interviewer", question, session["next_sequence_no"])
         session["next_sequence_no"] += 1
-        session["last_activity_at"] = now()
+        touch(session)
 
     ctx = (
         _question_context(session["assigned_question"])
@@ -217,6 +280,9 @@ async def get_boilerplate(session_id: str, language: str, user: AuthenticatedUse
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
     check_ownership(session, user)
+
+    check_idle_timeout(session)
+    touch(session)
 
     assigned = session.get("assigned_question")
     if not assigned:
@@ -274,7 +340,14 @@ async def resume_session(session_id: str, user: AuthenticatedUser = Depends(get_
     # past SESSION_IDLE_TIMEOUT_MINUTES before being resumed would trip the
     # idle-timeout check on the very next message, immediately after the
     # candidate just resumed it.
-    session["last_activity_at"] = now()
+    #
+    # This is the one deliberate place that touches WITHOUT checking idle
+    # first, so resuming does revive an expired session. That's intended (an
+    # explicit resume by the owner is a real "I'm back" signal), and it is
+    # bounded: the wall-clock cap is measured from started_at and no amount of
+    # resuming moves it, so a session still cannot outlive
+    # MAX_SESSION_DURATION_MINUTES.
+    touch(session)
 
     ctx = _question_context(session["assigned_question"]) if session.get("assigned_question") else None
     return ResumeSessionResponse(
@@ -298,6 +371,9 @@ async def save_diagram(req: SaveDiagramRequest, user: AuthenticatedUser = Depend
         raise HTTPException(status_code=404, detail="Session not found")
     check_ownership(session, user)
 
+    check_idle_timeout(session)
+    touch(session)
+
     session["diagram_elements"] = req.elements
     await run_in_threadpool(persist_diagram, req.session_id, req.elements)
     return {"saved": True}
@@ -311,6 +387,10 @@ async def run_tests(req: RunTestsRequest, user: AuthenticatedUser = Depends(get_
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
     check_ownership(session, user)
+    # Order matters: expire an abandoned session BEFORE touching it, or any
+    # request could revive one that had already timed out.
+    check_idle_timeout(session)
+    touch(session)
 
     assigned = session.get("assigned_question")
     bank_lang = "cpp" if req.language == "gcc" else req.language

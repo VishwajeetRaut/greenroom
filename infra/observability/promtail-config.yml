@@ -1,0 +1,38 @@
+# Ships the backend's structured JSON logs into Loki.
+#
+# services/logger.py already emits one JSON object per line, which is why this
+# needs no regex parsing — the pipeline below just reads the fields that are
+# already there. That was the whole point of the structured logger; until now
+# nothing consumed it.
+server:
+  http_listen_port: 9080
+  grpc_listen_port: 0
+
+positions:
+  filename: /tmp/positions.yaml
+
+clients:
+  - url: http://loki:3100/loki/api/v1/push
+
+scrape_configs:
+  - job_name: greenroom-backend
+    static_configs:
+      - targets: [localhost]
+        labels:
+          job: greenroom-backend
+          __path__: /var/log/greenroom/*.log
+    pipeline_stages:
+      - json:
+          expressions:
+            level: level
+            event: event
+            ts: ts
+      # `level` and `event` only. Both are closed sets, so they're safe as
+      # labels. Never promote session_id, user_id or latency_ms — high
+      # cardinality is as expensive in Loki as it is in Prometheus.
+      - labels:
+          level:
+          event:
+      - timestamp:
+          source: ts
+          format: RFC3339Nano

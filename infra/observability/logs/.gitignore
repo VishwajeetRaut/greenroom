@@ -1,0 +1,5 @@
+# Captured backend logs land here for Promtail to ship. Never commit them —
+# log bodies contain transcripts, candidate code and session ids (only `level`
+# and `event` are promoted to Loki labels; the rest stays in the body).
+*
+!.gitignore

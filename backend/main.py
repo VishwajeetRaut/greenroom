@@ -2,12 +2,13 @@ import os
 import time
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 
 load_dotenv()
 
 from routers import analytics, interview, tts  # noqa: E402
+from services import metrics  # noqa: E402
 from services.logger import log  # noqa: E402
 
 app = FastAPI(title="Greenroom API", version="0.1.0")
@@ -27,15 +28,31 @@ app.add_middleware(
 async def request_logger(request: Request, call_next):
     start = time.monotonic()
     response = await call_next(request)
-    latency = round((time.monotonic() - start) * 1000)
+    elapsed = time.monotonic() - start
     log.info(
         "http.request",
         method=request.method,
         path=request.url.path,
         status=response.status_code,
-        latency_ms=latency,
+        latency_ms=round(elapsed * 1000),
     )
+    # Route TEMPLATE, not the raw path — see services.metrics.route_template.
+    metrics.record_http(request.method, metrics.route_template(request),
+                        response.status_code, elapsed)
     return response
+
+
+@app.get("/metrics", include_in_schema=False)
+async def prometheus_metrics():
+    """Prometheus scrape target.
+
+    Deliberately unauthenticated and deliberately NOT under /api: it exposes
+    only aggregate counters (no prompts, transcripts, or user identifiers), and
+    Prometheus scrapes it from inside the private VNet. If this is ever exposed
+    publicly, put it behind the ingress rules rather than adding auth here —
+    scrapers don't carry bearer tokens.
+    """
+    return Response(content=metrics.render(), media_type=metrics.CONTENT_TYPE)
 
 
 app.include_router(interview.router, prefix="/api")

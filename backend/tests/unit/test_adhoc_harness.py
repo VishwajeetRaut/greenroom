@@ -3,7 +3,6 @@ import pytest
 
 from services import adhoc_harness, harness_generator
 
-
 # ── _infer_method_name ───────────────────────────────────────────────────────
 
 def test_infer_plain_function_call():
