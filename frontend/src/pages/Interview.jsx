@@ -1,4 +1,4 @@
-import { lazy, Suspense, useRef } from "react";
+import { lazy, Suspense, useRef, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 import Navbar from "../components/Navbar";
 import Waveform from "../components/Waveform";
@@ -21,13 +21,20 @@ export default function Interview() {
   const boardRef = useRef(null);
 
   const codeRunner = useCodeRunner();
+  const [designContext, setDesignContext] = useState(null);
   const session = useInterviewSession({
     track,
     boardRef,
     // Only technical sessions have a code editor/boilerplate to fetch —
     // wiring this unconditionally fired a wasted boilerplate request on
     // every behavioral/system-design session's first assigned question.
-    onQuestionContext: track === "technical" ? codeRunner.handleQuestionAssigned : undefined,
+    // System design still wants the context itself (requirements and scale
+    // numbers for the board), just not the boilerplate fetch that comes with
+    // the code-runner handler.
+    onQuestionContext:
+      track === "technical" ? codeRunner.handleQuestionAssigned
+      : track === "system-design" ? setDesignContext
+      : undefined,
     resumeSessionId,
     // Stamp the session id into the URL so a page refresh resumes the same
     // interview instead of starting a brand-new one.
@@ -189,6 +196,7 @@ export default function Interview() {
                   ref={boardRef}
                   initialElements={session.initialDiagramElements}
                   onSave={session.saveDiagram}
+                  questionContext={designContext}
                 />
               </Suspense>
             ) : (

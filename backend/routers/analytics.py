@@ -4,6 +4,7 @@ from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 
 from auth import AuthenticatedUser, get_current_user
 from models import AnalyticsEventRequest
+from services import llm_cache, token_meter
 from services.persistence import persist_analytics_event
 from services.rate_limit import check_rate_limit
 from services.supabase_client import get_supabase
@@ -22,6 +23,31 @@ async def track_event(
         persist_analytics_event, user.id, req.session_id, req.event, req.properties,
     )
     return {"status": "accepted"}
+
+
+@router.get("/llm-cache")
+async def get_llm_cache_stats(user: AuthenticatedUser = Depends(get_current_user)):
+    """Operational counters for the LLM response cache (services.llm_cache).
+
+    Aggregate only — no prompts, responses, or per-user data. The
+    est_*_tokens_saved figures are measured against the actual prompt and
+    response sizes each cached entry stands in for, so they're the input to
+    the model cost comparison rather than a guess. In-process counters, so
+    they reset on restart and are per-replica."""
+    return llm_cache.stats()
+
+
+@router.get("/llm-usage")
+async def get_llm_usage(user: AuthenticatedUser = Depends(get_current_user)):
+    """Provider-reported token usage broken down by call site.
+
+    Token counts are exact (they come from the provider's own `usage` object,
+    not an estimate). The dollar figures multiply those counts by
+    token_meter.PRICING, which is indicative rather than vendor-verified —
+    see the caveat on that constant before using this for budgeting.
+
+    In-process counters: they reset on restart and are per-replica."""
+    return token_meter.stats()
 
 
 @router.get("/stats")
