@@ -1,19 +1,21 @@
 """
 Rate limiter — sliding window, Postgres-backed.
 
-Every request inserts one row into rate_limit_events. The check counts rows
-in the trailing 60 seconds for the requesting user. Both backend replicas
-query the same Postgres instance, so the limit is truly per-user across the
-fleet (unlike the previous in-memory deque which gave each replica its own
-independent counter).
+The count-and-record step runs as a single atomic call to the check_rate_limit
+Postgres function (see supabase/migrations/20260715_rate_limit_atomic.sql).
+It must stay one call: the previous version counted rows and then inserted in
+a separate round-trip, which let a concurrent burst all read a count below the
+limit before any insert landed, admitting every request. Both backend replicas
+call the same function, so the limit is per-user across the fleet.
 
-Old rows (> 5 minutes) are pruned on each check to prevent unbounded growth.
+Old rows (> 5 minutes) are pruned after each check to prevent unbounded growth.
 No separate cron job is needed — the table stays small because only the
 trailing window matters.
 
 Fallback: if Supabase is not configured (local dev without a DB), the limiter
-falls back to the previous in-memory deque so development still works without
-credentials.
+falls back to an in-memory deque so development still works without
+credentials. That path is per-replica and therefore only correct for a single
+process — it is not a substitute for the Postgres path in a deployment.
 """
 
 from __future__ import annotations
@@ -49,32 +51,34 @@ def check_rate_limit(key: str, max_per_minute: int = 30) -> None:
 # ── Postgres implementation ───────────────────────────────────────────────────
 
 def _check_postgres(sb, key: str, max_per_minute: int) -> None:
-    from datetime import datetime, timedelta, timezone
+    # One call: the function counts the window and records the request while
+    # holding a per-user advisory lock. Splitting this back into a count and a
+    # separate insert reintroduces the race the function exists to close.
+    result = sb.rpc(
+        "check_rate_limit",
+        {"p_user_id": key, "p_max": max_per_minute, "p_window_seconds": _WINDOW_SECONDS},
+    ).execute()
 
-    now = datetime.now(timezone.utc)
-    window_start = now - timedelta(seconds=_WINDOW_SECONDS)
-    prune_before = now - timedelta(seconds=_PRUNE_AFTER_SECONDS)
+    allowed = result.data
+    if isinstance(allowed, list):  # some client versions wrap scalar returns
+        allowed = allowed[0] if allowed else None
 
-    # Count requests in the trailing window
-    result = (
-        sb.table("rate_limit_events")
-        .select("id", count="exact")
-        .eq("user_id", key)
-        .gte("ts", window_start.isoformat())
-        .execute()
-    )
-    count = result.count or 0
-
-    if count >= max_per_minute:
+    if allowed is False:
         raise HTTPException(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
             detail="Too many requests — please slow down and try again shortly.",
         )
 
-    # Record this request
-    sb.table("rate_limit_events").insert({"user_id": key, "ts": now.isoformat()}).execute()
+    _prune(sb)
 
-    # Prune old rows (fire-and-forget; failure is acceptable)
+
+def _prune(sb) -> None:
+    """Drop rows outside the retention window. Fire-and-forget: a failed prune
+    only costs table size, so it must never fail a request that the limiter
+    already admitted."""
+    from datetime import datetime, timedelta, timezone
+
+    prune_before = datetime.now(timezone.utc) - timedelta(seconds=_PRUNE_AFTER_SECONDS)
     try:
         sb.table("rate_limit_events").delete().lt("ts", prune_before.isoformat()).execute()
     except Exception:
