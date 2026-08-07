@@ -290,7 +290,14 @@ than estimated:
 - **LLM fallback rate** (Groq → Ollama) — not currently logged as a
   countable event. (Known qualitatively: Groq hit its daily token quota
   during this week's work, confirmed directly.)
-- **Cost per completed session** — no token-usage tracking wired up.
+- ~~**Cost per completed session** — no token-usage tracking wired up.~~
+  **Measured 2026-08-06: ~$0.0086 per completed session** on
+  `llama-3.3-70b-versatile`. `services/token_meter.py` now records
+  provider-reported token counts per call site, and
+  `scripts/benchmark_models.py` benchmarks candidate models against the real
+  production prompts. 61% of that cost is the per-turn interviewer call, whose
+  input grows with the transcript. Full breakdown, model comparison, and the
+  pricing caveat: [MODEL_COST_MATRIX.md](./MODEL_COST_MATRIX.md).
 - **Piston vs Wandbox execution split** — logged per-request but not
   aggregated anywhere queryable; the self-hosted Piston sandbox has been
   unreachable for the entirety of this week's local testing, with every
