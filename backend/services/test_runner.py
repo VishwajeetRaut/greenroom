@@ -12,6 +12,8 @@ import asyncio
 import json
 import re
 
+from services import llm_cache
+
 # ── Step 1: LLM generates test-case data only ────────────────────────────────
 
 _CASES_SYSTEM = """\
@@ -55,7 +57,7 @@ def _strip_fences(text: str) -> str:
     return text.strip()
 
 
-def _generate_cases(problem: str) -> list[dict] | None:
+def _generate_cases_uncached(problem: str) -> list[dict] | None:
     from langchain_core.messages import HumanMessage, SystemMessage
 
     from services.llm import _fallback_chat, _make_llm
@@ -67,7 +69,7 @@ def _generate_cases(problem: str) -> list[dict] | None:
     ]
 
     try:
-        llm = _make_llm(temperature=0.1, max_tokens=600)
+        llm = _make_llm(temperature=0.1, max_tokens=600, call_site="test_runner.cases")
         result = llm.invoke([SystemMessage(content=_CASES_SYSTEM), HumanMessage(content=prompt)])
         raw = _strip_fences(result.content)
     except Exception as exc:
@@ -77,7 +79,8 @@ def _generate_cases(problem: str) -> list[dict] | None:
             # tokens on hidden "reasoning" content before writing the actual
             # reply — 600 was consistently exhausted by reasoning alone,
             # leaving empty content. 1200 was verified empirically sufficient.
-            raw = _strip_fences(_fallback_chat(msgs, max_tokens=1200, temperature=0.1))
+            raw = _strip_fences(_fallback_chat(msgs, max_tokens=1200, temperature=0.1,
+                                               call_site="test_runner.cases"))
         else:
             return None
 
@@ -88,6 +91,25 @@ def _generate_cases(problem: str) -> list[dict] | None:
     except json.JSONDecodeError:
         pass
     return None
+
+
+def _generate_cases(problem: str) -> list[dict] | None:
+    """Cached wrapper. This runs once per "Run tests" click, and a candidate
+    clicks Run tests many times against the SAME problem in a single coding
+    interview — every click was re-sending the whole problem statement and
+    re-generating the same six cases at temperature 0.1. The generated cases
+    are a pure function of `problem`, so they're cached by its content
+    (services.llm_cache).
+
+    A None result (generation or JSON parse failed) is deliberately not
+    cached — that's transient, and the next Run tests click should get a real
+    attempt rather than a pinned failure."""
+    return llm_cache.cached_call(
+        "test_runner.cases",
+        (_CASES_SYSTEM, problem),
+        lambda: _generate_cases_uncached(problem),
+        prompt_chars=len(_CASES_SYSTEM) + len(problem),
+    )
 
 
 # ── Step 2: We write the harness; only the data comes from the LLM ───────────
