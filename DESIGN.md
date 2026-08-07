@@ -212,6 +212,22 @@ When a system-design session ends, `llm.evaluate_diagram()` scores the candidate
 
 `GET /api/tts/speak` previously regenerated audio via `edge-tts` from scratch on every call, even for text already synthesized moments earlier — a candidate replaying the interviewer's question, or navigating back to one already asked, paid the full latency and (conceptually) cost again. `services/tts.py` now caches on disk, keyed by `sha256(voice:text)`, with atomic writes (temp file + rename) and LRU eviction once the cache exceeds a bounded entry count.
 
+### Load testing: what actually broke first
+
+Measured with `backend/scripts/load_test.py`; full numbers and method in [LOAD_TEST.md](docs/LOAD_TEST.md).
+
+**`/api/health` was the first thing to fold** — 87 rps at p50 539 ms, against 3,268 rps at 14 ms for `/metrics` on the same server. A health endpoint that collapses under load is worse than useless: it is what tells the orchestrator to kill a container that was actually fine, so this would have surfaced as random instability rather than as a slow endpoint. Two causes, both fixed: a fresh `httpx.AsyncClient` (and its TLS context) was constructed per request, and the Piston probe ran on every call, turning a burst of health checks into a burst of outbound requests. Now ~4,300 rps at p50 10 ms.
+
+Caching the probe then introduced a **cache stampede** — every concurrent caller missing at the same instant the entry expired. The median looked healthy while p99 ran 12× it, which is exactly why `load_test.py` prints a tail ratio. `_piston_health` is single-flight now.
+
+**Auth was a network round-trip per request, and could starve the threadpool.** `get_current_user` validated every request against Supabase with no caching, and its retry used a *blocking* `time.sleep(0.3)` inside a dependency FastAPI runs in its 40-worker threadpool — the same pool shared by every `run_in_threadpool` call in the app. Roughly 133 failed auths per second saturates it and stalls every in-flight interview, and reaching that needs only an expired token, a frontend retry loop, or a Supabase blip (which is when all the retries fire at once). `services/auth_cache.py` caches successes for 60 s and failures for 5 s; the pause dropped to 50 ms. The 401 path went from 93 to 514 rps.
+
+The cache keys on a SHA-256 of the token, never the token — otherwise it is a bag of live credentials sitting in memory — and never outlives the JWT's own `exp`. That claim is read *without* verifying the signature, which is safe only because it is used to expire entries **earlier**, never to authorise anything.
+
+Two smaller fixes: the rate limiter ran an **unscoped `DELETE` sweeping every user's rows on every request** (now sampled at 2%), and `_session_locks` grew forever because it was only cleaned on explicit delete (now bounded, skipping locks currently held — evicting one would break the mutual exclusion it exists for).
+
+**The real ceiling isn't CPU.** At ~8,600 tokens per completed session against Groq's 100,000/day free tier, that is roughly 11 full interviews per day. The binding constraint is billing, not capacity.
+
 ### Metrics and alerting: what the structured logger was always for
 
 `services/logger.py` has emitted one structured JSON object per line since day one, and until now nothing consumed it. That is why `docs/EVALUATION_METRICS.md` §6 and §7 could list four things as *not yet measurable* despite the app already logging all four: the data existed, it just went to stdout and stopped there.
@@ -439,6 +455,7 @@ MAX_CANDIDATE_TURNS=15                 # Default: 15
 MAX_SESSION_DURATION_MINUTES=120       # Default: 120 (wall-clock cap)
 EVAL_MAX_TRANSCRIPT_TOKENS=12000       # Default: 12000 (transcript budget)
 METRICS_ENABLED=true                   # Default: true (Prometheus /metrics)
+AUTH_CACHE_TTL_SECONDS=60              # Default: 60 (validated-JWT cache)
 EVAL_SELF_CRITIQUE_ENABLED=true        # Default: true
 
 # Azure OpenAI — end-of-session evaluation report only (evaluate_session,
