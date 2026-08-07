@@ -24,7 +24,7 @@ from langchain_groq import ChatGroq
 from langchain_openai import AzureChatOpenAI
 from pydantic import BaseModel, Field
 
-from services import guardrail
+from services import guardrail, jd_analyzer, llm_cache, token_meter
 from services.logger import log
 
 # ── env ──────────────────────────────────────────────────────────────────────
@@ -46,6 +46,10 @@ AZURE_OPENAI_API_KEY    = os.environ.get("AZURE_OPENAI_API_KEY", "")
 AZURE_OPENAI_ENDPOINT   = os.environ.get("AZURE_OPENAI_ENDPOINT", "")
 AZURE_OPENAI_DEPLOYMENT = os.environ.get("AZURE_OPENAI_DEPLOYMENT", "gpt-5-mini")
 AZURE_OPENAI_API_VERSION = os.environ.get("AZURE_OPENAI_API_VERSION", "2024-12-01-preview")
+
+# How many distinct opening greetings to keep per (track, role) before serving
+# them from cache instead of generating a new one. See opening_message.
+OPENING_POOL_SIZE = int(os.environ.get("LLM_OPENING_POOL_SIZE", "5"))
 
 
 # ── Pydantic schemas for structured evaluation output ────────────────────────
@@ -72,18 +76,38 @@ class EvaluationResult(BaseModel):
 
 # ── LangChain LLM (with Groq) ────────────────────────────────────────────────
 
-def _make_llm(temperature: float = 0.7, max_tokens: int = 300) -> ChatGroq:
+def _make_llm(
+    temperature: float = 0.7, max_tokens: int = 300,
+    call_site: str = "unattributed", model: str | None = None,
+) -> ChatGroq:
+    """Single construction point for every Groq call.
+
+    call_site is what makes token accounting useful — the interesting question
+    isn't total spend but which part of a session is expensive, so usage is
+    tagged here rather than aggregated anonymously. The recorder is attached
+    as a callback (not read off the return value) because several call sites
+    are LCEL chains ending in an output parser, which discards the AIMessage
+    carrying the usage metadata before the caller ever sees it.
+
+    model overrides GROQ_MODEL for a single call — used by
+    scripts/benchmark_models.py to run the same workload across models.
+    """
     if not GROQ_API_KEY:
         raise RuntimeError("GROQ_API_KEY is not set.")
+    resolved = model or GROQ_MODEL
     return ChatGroq(
         api_key=GROQ_API_KEY,
-        model=GROQ_MODEL,
+        model=resolved,
         temperature=temperature,
         max_tokens=max_tokens,
+        callbacks=[token_meter.UsageRecorder(call_site, provider="groq", model=resolved)],
     )
 
 
-def _make_azure_llm(temperature: float = 0.7, max_tokens: int = 300) -> AzureChatOpenAI:
+def _make_azure_llm(
+    temperature: float = 0.7, max_tokens: int = 300,
+    call_site: str = "unattributed",
+) -> AzureChatOpenAI:
     """Evaluation-only LLM (Azure OpenAI gpt-5-mini). Used by evaluate_session,
     _self_critique, and evaluate_diagram — nowhere else.
 
@@ -105,12 +129,27 @@ def _make_azure_llm(temperature: float = 0.7, max_tokens: int = 300) -> AzureCha
         api_version=AZURE_OPENAI_API_VERSION,
         max_completion_tokens=max_tokens,
         reasoning_effort="minimal",
+        # Same recorder as _make_llm. Evaluation moved to Azure after this
+        # metering was written, and _make_azure_llm is a separate constructor —
+        # so without this line the whole evaluation path (evaluate_session,
+        # _self_critique, evaluate_diagram) records nothing, which is exactly
+        # the blind spot this module exists to remove. gpt-5-mini has no entry
+        # in token_meter.PRICING, so it reports exact token counts and shows up
+        # under `unpriced_models` rather than silently costing $0.
+        callbacks=[token_meter.UsageRecorder(
+            call_site, provider="azure", model=AZURE_OPENAI_DEPLOYMENT,
+        )],
     )
 
 
 # ── Fallback: Ollama-cloud (OpenAI-compatible REST) ──────────────────────────
 
-def _fallback_chat(messages: list[dict], max_tokens: int, temperature: float, json_mode: bool = False) -> str:
+def _fallback_chat(
+    messages: list[dict], max_tokens: int, temperature: float, json_mode: bool = False,
+    call_site: str = "unattributed",
+) -> str:
+    """This path never touches LangChain, so the callback in _make_llm can't
+    see it — usage is recorded directly off the OpenAI-compatible response."""
     if not FALLBACK_BASE_URL or not FALLBACK_API_KEY:
         raise RuntimeError("Fallback LLM not configured (FALLBACK_BASE_URL / FALLBACK_API_KEY missing).")
     payload: dict = {
@@ -129,7 +168,9 @@ def _fallback_chat(messages: list[dict], max_tokens: int, temperature: float, js
         follow_redirects=True,
     )
     resp.raise_for_status()
-    return resp.json()["choices"][0]["message"]["content"].strip()
+    body = resp.json()
+    token_meter.record_openai_usage(call_site, "fallback", body)
+    return body["choices"][0]["message"]["content"].strip()
 
 
 # ── Track personas ────────────────────────────────────────────────────────────
@@ -293,12 +334,31 @@ def _history_to_lc(history: list[dict]) -> list:
 # ── Public API ────────────────────────────────────────────────────────────────
 
 def opening_message(track: str, role: str) -> str:
-    """LLM-generated warm greeting that opens the interview session."""
+    """LLM-generated warm greeting that opens the interview session.
+
+    Cached as a variant POOL rather than a single response: the inputs
+    (track, role) take only a handful of distinct values across the whole
+    product, so without caching every session start pays for a greeting that
+    is near-identical to one already generated. Collapsing it to one cached
+    string would make every candidate hear the exact same sentence forever,
+    so the first OPENING_POOL_SIZE sessions per (track, role) generate and
+    fill the pool, and every session after that is served free from it.
+    """
+    return llm_cache.pooled_call(
+        "llm.opening",
+        (track, role, GROQ_MODEL),
+        lambda: _opening_message_uncached(track, role),
+        pool_size=OPENING_POOL_SIZE,
+        prompt_chars=len(OPENING_SYSTEM_PROMPT.format(track=track, role=role)),
+    )
+
+
+def _opening_message_uncached(track: str, role: str) -> str:
     import time
     system = OPENING_SYSTEM_PROMPT.format(track=track, role=role)
     start = time.monotonic()
     try:
-        llm_client = _make_llm(temperature=0.9, max_tokens=120)
+        llm_client = _make_llm(temperature=0.9, max_tokens=120, call_site="opening_message")
         result = llm_client.invoke([
             SystemMessage(content=system),
             HumanMessage(content="[The interview session is starting now.]"),
@@ -314,7 +374,7 @@ def opening_message(track: str, role: str) -> str:
                     {"role": "system", "content": system},
                     {"role": "user",   "content": "[The interview session is starting now.]"},
                 ],
-                max_tokens=120, temperature=0.9,
+                max_tokens=120, temperature=0.9, call_site="opening_message",
             )
             log.info("llm.opening", track=track, latency_ms=round((time.monotonic() - start) * 1000), provider="fallback")
             return result
@@ -323,7 +383,7 @@ def opening_message(track: str, role: str) -> str:
 
 def next_question(
     track: str, role: str, history: list[dict], assigned_question: dict | None = None,
-    job_description: str | None = None, is_new_assignment: bool = False,
+    jd_profile: dict | None = None, is_new_assignment: bool = False,
 ) -> str:
     """
     LangChain LCEL interview chain:
@@ -347,8 +407,12 @@ def next_question(
     later test-runner can grade against verified canonical test cases.
     """
     system_prompt = TRACK_PERSONAS.get(track, TRACK_PERSONAS["behavioral"]).format(role=role)
-    if job_description:
-        system_prompt += f"\n\n[Job description the candidate is interviewing for]\n{job_description.strip()}"
+    # A compact structured profile, not the raw paste. The system prompt is
+    # re-sent on EVERY turn, so a 5000-char job description was being paid for
+    # once per turn — and the per-turn call is already 61% of session cost
+    # (docs/MODEL_COST_MATRIX.md). The profile carries the parts that actually
+    # steer the interview in a few hundred characters.
+    system_prompt += jd_analyzer.prompt_fragment(jd_profile)
     if track == "behavioral" and assigned_question:
         expected = assigned_question.get("expected_elements") or []
         elements_note = (
@@ -409,7 +473,7 @@ def next_question(
                 MessagesPlaceholder(variable_name="history"),
                 ("human", "{input}"),
             ])
-            chain = p | _make_llm(temperature=temperature, max_tokens=200) | StrOutputParser()
+            chain = p | _make_llm(temperature=temperature, max_tokens=200, call_site="next_question") | StrOutputParser()
             return chain.invoke({"history": lc_history, "input": last_turn})
         except Exception as exc:
             status = getattr(exc, "status_code", None)
@@ -418,7 +482,7 @@ def next_question(
                 for m in lc_history:
                     raw_msgs.append({"role": "assistant" if isinstance(m, AIMessage) else "user", "content": m.content})
                 raw_msgs.append({"role": "user", "content": last_turn})
-                return _fallback_chat(raw_msgs, max_tokens=200, temperature=temperature)
+                return _fallback_chat(raw_msgs, max_tokens=200, temperature=temperature, call_site="next_question")
             raise
 
     import time as _time
@@ -471,7 +535,7 @@ def _self_critique(track: str, role: str, transcript: str, draft: dict) -> dict:
             f"Transcript:\n{transcript or 'The candidate did not answer any questions.'}\n\n"
             f"Draft evaluation to review:\n{json.dumps(draft)}"
         )
-        llm = _make_azure_llm(temperature=0.2, max_tokens=700)
+        llm = _make_azure_llm(temperature=0.2, max_tokens=700, call_site="evaluate_session.self_critique")
         llm_json = llm.bind(response_format={"type": "json_object"})
         parser = JsonOutputParser(pydantic_object=EvaluationResult)
         chain = llm_json | parser
@@ -526,7 +590,7 @@ def evaluate_session(track: str, role: str, history: list[dict]) -> dict:
     parser = JsonOutputParser(pydantic_object=EvaluationResult)
 
     try:
-        llm = _make_azure_llm(temperature=0.3, max_tokens=700)
+        llm = _make_azure_llm(temperature=0.3, max_tokens=700, call_site="evaluate_session")
         llm_json = llm.bind(response_format={"type": "json_object"})
         chain = llm_json | parser
         result = chain.invoke(lc_messages)
@@ -544,7 +608,7 @@ def evaluate_session(track: str, role: str, history: list[dict]) -> dict:
                     {"role": "system", "content": system_content},
                     {"role": "user",   "content": transcript or "The candidate did not answer any questions."},
                 ],
-                max_tokens=700, temperature=0.3, json_mode=True,
+                max_tokens=700, temperature=0.3, json_mode=True, call_site="evaluate_session",
             )
             try:
                 # Some fallback providers wrap JSON in markdown fences even
@@ -662,7 +726,7 @@ def evaluate_diagram(
     }
 
     try:
-        llm_client = _make_azure_llm(temperature=0.1, max_tokens=400)
+        llm_client = _make_azure_llm(temperature=0.1, max_tokens=400, call_site="evaluate_diagram")
         llm_json = llm_client.bind(response_format={"type": "json_object"})
         chain = llm_json | JsonOutputParser()
         result = chain.invoke([HumanMessage(content=prompt)])
@@ -675,7 +739,7 @@ def evaluate_diagram(
             try:
                 raw = _fallback_chat(
                     [{"role": "user", "content": prompt}],
-                    max_tokens=400, temperature=0.1, json_mode=True,
+                    max_tokens=400, temperature=0.1, json_mode=True, call_site="evaluate_diagram",
                 )
                 cleaned = re.sub(r"^```[a-z]*\n?", "", raw.strip())
                 cleaned = re.sub(r"\n?```$", "", cleaned).strip()
