@@ -49,7 +49,7 @@ jobs:
       url: ${{ env.FRONTEND_ORIGIN }}
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           # workflow_run checks out the default branch by default, not the
           # commit that actually triggered the upstream CI run — pin to it
