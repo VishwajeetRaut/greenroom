@@ -157,7 +157,7 @@ jobs:
           echo "Current backend image before this deploy: $prev"
 
       - name: Deploy backend
-        uses: azure/cli@v2
+        uses: azure/cli@v3
         with:
           azcliversion: latest
           inlineScript: |
@@ -181,7 +181,7 @@ jobs:
               --output none
 
       - name: Deploy frontend
-        uses: azure/cli@v2
+        uses: azure/cli@v3
         with:
           azcliversion: latest
           inlineScript: |
