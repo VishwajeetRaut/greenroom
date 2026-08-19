@@ -129,7 +129,7 @@ jobs:
       # hiccup or permissions regression here must never stop the actual
       # deploy below it in the same job.
       - name: Upload backend scan results
-        uses: github/codeql-action/upload-sarif@v3
+        uses: github/codeql-action/upload-sarif@v4
         continue-on-error: true
         with:
           sarif_file: trivy-backend.sarif
